@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: comfy-training-dashboard
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 2 -b 0.0.0.0:$PORT app:app
+    envVars:
+      - key: DASHBOARD_PASSWORD
+        sync: false
+    disk:
+      # Persistent disk for data/dashboard.db and data/secrets.json — without
+      # this, every redeploy wipes all uploaded reports (Render's filesystem
+      # is otherwise ephemeral). Persistent disks need a paid instance type
+      # (this is why `plan: starter`, not `free`) — drop the whole `disk:`
+      # block and switch to `plan: free` only if losing data on every
+      # redeploy is acceptable.
+      name: dashboard-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1

@@ -1,0 +1,9 @@
+.venv/
+data/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Real personnel data (names, test scores) — not needed to run the app,
+# and shouldn't leave this machine via a pushed git history.
+Звіти/

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Навчання COMFY — дашборд</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<div id="login-screen" class="login-screen" hidden>
+  <div class="login-card">
+    <img class="logo" src="/static/assets/logo_green.png" alt="COMFY">
+    <h1>Дашборд навчання</h1>
+    <p class="subtitle">Введіть пароль, щоб продовжити</p>
+    <div id="login-error" class="error-text"></div>
+    <input type="password" id="login-password" placeholder="Пароль" autocomplete="current-password">
+    <button class="btn btn-primary btn-block" id="login-submit">Увійти</button>
+  </div>
+</div>
+
+<div id="app" class="page" hidden>
+
+  <div class="top-bar">
+    <div class="brand">
+      <img class="logo" src="/static/assets/logo_green.png" alt="COMFY">
+      <div>
+        <div class="brand-title">Навчання COMFY</div>
+        <div class="brand-subtitle">Залученість і успішність навчання по мережі</div>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button class="btn btn-secondary btn-sm" id="btn-classify">Класифікація посад</button>
+      <button class="btn btn-primary" id="btn-upload">Завантажити дані</button>
+      <button class="btn btn-secondary btn-sm" id="btn-logout">Вийти</button>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="overall">Все навчання</button>
+    <button class="tab-btn" data-tab="attestation">Атестація</button>
+    <button class="tab-btn" data-tab="project">Проєкти</button>
+  </div>
+
+  <div id="position-switch" class="position-switch" hidden></div>
+
+  <div id="content-area">
+    <!-- filled dynamically -->
+  </div>
+
+</div>
+
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+
+<script src="/static/js/vendor/xlsx.full.min.js"></script>
+<script src="/static/js/vendor/chart.umd.min.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>
