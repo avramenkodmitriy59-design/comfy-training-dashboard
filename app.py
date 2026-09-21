@@ -637,14 +637,17 @@ def aep_no_shows():
         return jsonify({"error": "year і quarter обов'язкові"}), 400
     conn = db.get_db()
     total_sessions = conn.execute(
-        "SELECT COUNT(DISTINCT event_name || '|' || event_date) AS c FROM aep_attendance "
+        # Counts distinct TRAININGS (event_name), not slots — one topic held
+        # across several date/time slots (see "Слоти" in the topics table)
+        # is one training either way, whichever slot someone attends.
+        "SELECT COUNT(DISTINCT event_name) AS c FROM aep_attendance "
         "WHERE period_year=? AND period_quarter=?",
         (year, quarter),
     ).fetchone()["c"]
     roster = conn.execute("SELECT id, name, name_norm, store, tier FROM aep_roster").fetchall()
     aliases = load_aep_aliases(conn)
     checked_rows = conn.execute(
-        "SELECT DISTINCT name_norm, event_name, event_date FROM aep_attendance "
+        "SELECT DISTINCT name_norm, event_name FROM aep_attendance "
         "WHERE period_year=? AND period_quarter=? AND status='CHECKED_IN'",
         (year, quarter),
     ).fetchall()
@@ -655,12 +658,15 @@ def aep_no_shows():
 
     # Resolve each attendee to their best-matching roster row (exact >
     # nickname-folded > fuzzy typo) against the FULL roster, then count
-    # distinct sessions per roster row id — this way a near-duplicate roster
-    # entry (e.g. the same person listed twice with a typo'd surname) doesn't
-    # get credit that belongs to their "real" entry, and a nicknamed
+    # distinct TRAININGS (event_name, not event_name+date — see
+    # total_sessions above) per roster row id — this way a near-duplicate
+    # roster entry (e.g. the same person listed twice with a typo'd surname)
+    # doesn't get credit that belongs to their "real" entry, a nicknamed
     # attendance record ("Ксюша") still counts toward the roster's full-name
-    # entry ("Ксенія"). The tier filter (if any) is applied afterwards, only
-    # to which roster rows get listed in the response.
+    # entry ("Ксенія"), and checking into any one slot of a multi-slot topic
+    # counts as attending that training once. The tier filter (if any) is
+    # applied afterwards, only to which roster rows get listed in the
+    # response.
     matcher = build_roster_matcher(roster, aliases)
     if tier_filter:
         roster = [r for r in roster if r["tier"] == tier_filter]
@@ -671,7 +677,7 @@ def aep_no_shows():
         matched = matcher(r["name_norm"])
         if not matched:
             continue
-        checked_by_roster_id.setdefault(matched["id"], set()).add((r["event_name"], r["event_date"]))
+        checked_by_roster_id.setdefault(matched["id"], set()).add(r["event_name"])
 
     people = [{
         "name": r["name"], "store": r["store"], "tier": r["tier"],
