@@ -636,18 +636,29 @@ def aep_no_shows():
     if not year or not quarter:
         return jsonify({"error": "year і quarter обов'язкові"}), 400
     conn = db.get_db()
-    total_sessions = conn.execute(
-        # Counts distinct TRAININGS (event_name), not slots — one topic held
-        # across several date/time slots (see "Слоти" in the topics table)
-        # is one training either way, whichever slot someone attends.
-        "SELECT COUNT(DISTINCT event_name) AS c FROM aep_attendance "
-        "WHERE period_year=? AND period_quarter=?",
+    # The canonical list of trainings this quarter — and each slot's date —
+    # comes from the topics table (details/periods, same source as "Теми
+    # цього кварталу"), NOT from aep_attendance.event_name: the two source
+    # sheets (Training_Planning vs Apple_Certified_-_Attendance) name the
+    # same session differently often enough that string matching on the
+    # name is unreliable (e.g. "Ведіть ЕФЕКТИВНІ бесіди" in the topics sheet
+    # vs "Ведіть ЧУДОВІ бесіди" in the attendance sheet for the same
+    # session, or "Mac Hands-on (Champions by list)" vs "Практична робота з
+    # комп'ютерами Mac"). The slot DATE is consistent between both sheets,
+    # so that's the join key: map each date to its canonical topic name.
+    topic_rows = conn.execute(
+        "SELECT d.position AS topic, substr(d.event_date, 1, 10) AS day FROM details d "
+        "JOIN periods p ON p.id = d.period_id "
+        "WHERE p.stream_type='aep' AND p.period_year=? AND p.period_quarter=? "
+        "AND d.position IS NOT NULL AND d.event_date IS NOT NULL",
         (year, quarter),
-    ).fetchone()["c"]
+    ).fetchall()
+    date_to_topic = {r["day"]: r["topic"] for r in topic_rows}
+    total_sessions = len({r["topic"] for r in topic_rows})
     roster = conn.execute("SELECT id, name, name_norm, store, tier FROM aep_roster").fetchall()
     aliases = load_aep_aliases(conn)
     checked_rows = conn.execute(
-        "SELECT DISTINCT name_norm, event_name FROM aep_attendance "
+        "SELECT DISTINCT name_norm, event_date FROM aep_attendance "
         "WHERE period_year=? AND period_quarter=? AND status='CHECKED_IN'",
         (year, quarter),
     ).fetchall()
@@ -658,8 +669,8 @@ def aep_no_shows():
 
     # Resolve each attendee to their best-matching roster row (exact >
     # nickname-folded > fuzzy typo) against the FULL roster, then count
-    # distinct TRAININGS (event_name, not event_name+date — see
-    # total_sessions above) per roster row id — this way a near-duplicate
+    # distinct TRAININGS (via date_to_topic, not the attendance log's own
+    # event_name — see above) per roster row id — this way a near-duplicate
     # roster entry (e.g. the same person listed twice with a typo'd surname)
     # doesn't get credit that belongs to their "real" entry, a nicknamed
     # attendance record ("Ксюша") still counts toward the roster's full-name
@@ -674,10 +685,13 @@ def aep_no_shows():
             return jsonify({"people": [], "totalSessions": total_sessions})
     checked_by_roster_id = {}
     for r in checked_rows:
+        topic = date_to_topic.get(str(r["event_date"])[:10])
+        if not topic:
+            continue
         matched = matcher(r["name_norm"])
         if not matched:
             continue
-        checked_by_roster_id.setdefault(matched["id"], set()).add(r["event_name"])
+        checked_by_roster_id.setdefault(matched["id"], set()).add(topic)
 
     people = [{
         "name": r["name"], "store": r["store"], "tier": r["tier"],
