@@ -731,7 +731,7 @@ def aep_name_suggestions():
         unmatched_by_norm.setdefault(r["name_norm"], f"{r['first_name']} {r['last_name']}".strip())
 
     unmatched = [(display_name, name_norm) for name_norm, display_name in unmatched_by_norm.items()]
-    suggestions = suggest_name_matches(unmatched, roster)
+    suggestions = suggest_name_matches(unmatched, roster, population_name_norms=[r["name_norm"] for r in attendance])
     return jsonify({"suggestions": suggestions})
 
 

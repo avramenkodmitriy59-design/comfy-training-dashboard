@@ -470,7 +470,7 @@ def _token_similarity(a, b):
     return round(max(0.0, 1 - _levenshtein(a, b) / max_len) * 100, 1)
 
 
-def name_similarity_percent(a_norm, b_norm):
+def name_similarity_percent(a_norm, b_norm, rare_tokens=None):
     """Similarity between two normalized (space-joined, alphabetically
     sorted token) names, meant for surfacing merge SUGGESTIONS for a human
     to confirm — not for automatic matching (see build_roster_matcher's
@@ -480,7 +480,20 @@ def name_similarity_percent(a_norm, b_norm):
     only a plausible match if every token has *some* correspondence, so two
     different people who happen to share a common first name (e.g.
     "Олександр") don't score high just because that one token lines up
-    while the surname is completely different."""
+    while the surname is completely different.
+
+    `rare_tokens` (optional set): tokens that appear in only one or two
+    roster entries. An EXACT match on one of these is trusted as a strong
+    same-person signal — a distinctive surname — even when the other token
+    scores low, instead of letting the weakest-token-wins rule sink the
+    whole pair. This catches e.g. "Саша Мехед" (attendance log) vs the
+    roster's "Мехед Олександр": "саша" isn't a safe nickname fold for
+    "олександр" (ambiguous — could be Олександра too, see
+    _NICKNAME_TO_FULL), but "мехед" being an exact, roster-unique surname
+    match is itself strong enough to surface as a suggestion. A common
+    token (e.g. a first name shared by several champions) never gets this
+    boost even if it happens to match exactly, since that's exactly the
+    false-positive case the weakest-token rule exists to prevent."""
     a_tokens, b_tokens = a_norm.split(), b_norm.split()
     if not a_tokens or not b_tokens:
         return 0.0
@@ -491,7 +504,14 @@ def name_similarity_percent(a_norm, b_norm):
         return round(max(0.0, 1 - _levenshtein(a_norm, b_norm) / max_len) * 100, 1)
     best = 0.0
     for perm in permutations(b_tokens):
-        best = max(best, min(_token_similarity(x, y) for x, y in zip(a_tokens, perm)))
+        scores = [_token_similarity(x, y) for x, y in zip(a_tokens, perm)]
+        weakest = min(scores)
+        if rare_tokens:
+            for tok, score in zip(perm, scores):
+                if score == 100.0 and tok in rare_tokens:
+                    weakest = max(weakest, 70.0)
+                    break
+        best = max(best, weakest)
     return round(best, 1)
 
 
@@ -587,17 +607,34 @@ def build_roster_matcher(roster_rows, aliases=None):
     return match
 
 
-def suggest_name_matches(unmatched, roster_rows, min_similarity=65.0, max_candidates=3):
+def suggest_name_matches(unmatched, roster_rows, min_similarity=65.0, max_candidates=3, population_name_norms=None):
     """unmatched: list of (display_name, name_norm) tuples for attendance
     people the matcher (including aliases) couldn't resolve to any roster
     entry. For each, finds roster names at least `min_similarity`% similar
     — catches bigger typos and abbreviated signatures the automatic ≤2-edit
     fuzzy match misses — so an operator can review and confirm a merge.
-    Returns only names that have at least one candidate, best match first."""
+    Returns only names that have at least one candidate, best match first.
+
+    `population_name_norms`: optional iterable of additional name_norm
+    strings (e.g. every attendance record this quarter — duplicates from
+    one person attending multiple sessions are fine, deduped below) used,
+    together with the roster, to judge whether a token is a distinctive
+    surname or just a common first name (see name_similarity_percent's
+    `rare_tokens`). The roster alone is too small (tens of people) for
+    frequency to tell them apart — most first names there also happen to
+    appear only once or twice purely by roster size, not because they're
+    actually rare."""
+    distinct_names = {r["name_norm"] for r in roster_rows} | set(population_name_norms or ())
+    token_counts = {}
+    for name_norm in distinct_names:
+        for t in set(name_norm.split()):
+            token_counts[t] = token_counts.get(t, 0) + 1
+    rare_tokens = {t for t, c in token_counts.items() if c <= 2}
+
     suggestions = []
     for display_name, name_norm in unmatched:
         scored = [
-            (name_similarity_percent(name_norm, r["name_norm"]), r)
+            (name_similarity_percent(name_norm, r["name_norm"], rare_tokens), r)
             for r in roster_rows
         ]
         scored = [(sim, r) for sim, r in scored if sim >= min_similarity]
