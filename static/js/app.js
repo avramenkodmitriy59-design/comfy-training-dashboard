@@ -2703,7 +2703,7 @@ function renderDirectorReportPeopleTable(key) {
   const table = document.getElementById(`${key}-table`);
   const pageRows = pageSlice(key, rows);
   table.innerHTML = `
-    <thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Відвідано</th><th>% залученості</th></tr></thead>
+    <thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Пройдено</th><th>% залученості</th></tr></thead>
     <tbody>${pageRows.map((p) => `
       <tr>
         <td>${escapeHtml(p.name)}</td>
@@ -2949,7 +2949,7 @@ function renderTopics(topics) {
 }
 function renderWorst(elId, people) {
   document.getElementById(elId).innerHTML =
-    '<thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Відвідано</th><th>% залученості</th></tr></thead><tbody>' +
+    '<thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Пройдено</th><th>% залученості</th></tr></thead><tbody>' +
     (people.map((p) => '<tr><td>' + esc(p.name) + '</td><td>' + esc(p.region) + '</td><td>' + esc(p.store) + '</td><td>' + p.passed + ' з ' + p.total + '</td><td>' + progressCell(p.rate) + '</td></tr>').join('')
       || '<tr><td colspan="5" class="muted">Немає даних</td></tr>') + '</tbody>';
 }
