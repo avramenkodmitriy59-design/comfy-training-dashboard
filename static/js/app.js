@@ -2520,7 +2520,7 @@ function renderDirectorReportContent() {
       <div id="dr-historical-low-pagination"></div>
     </div>
     <div class="card">
-      <h3>ТОП <span class="muted">(за середньоарифметичним АТТ і Додаткового навчання)</span></h3>
+      <h3>ТОП <span class="muted">(середнє АТТ і Додаткового навчання &gt; 90%)</span></h3>
       <div class="table-scroll"><table class="data-table" id="dr-top-table"></table></div>
       <div id="dr-top-pagination"></div>
     </div>
@@ -2899,7 +2899,7 @@ body { background: var(--color-bg); padding: 24px; }
   <div class="table-scroll"><table class="data-table" id="x-historical-low"></table></div>
 </div>
 <div class="card">
-  <h3>ТОП <span class="muted">(за середньоарифметичним АТТ і Додаткового навчання)</span></h3>
+  <h3>ТОП <span class="muted">(середнє АТТ і Додаткового навчання &gt; 90%)</span></h3>
   <div class="table-scroll"><table class="data-table" id="x-top"></table></div>
 </div>
 <script>
@@ -2965,7 +2965,7 @@ function topOf(rows) {
       const values = [att, additional].filter((v) => v !== null);
       return values.length ? { name: g.name, region: g.region, store: g.store, att, additional, rankScore: values.reduce((s, v) => s + v, 0) / values.length } : null;
     })
-    .filter(Boolean)
+    .filter((p) => p && p.rankScore > 90)
     .sort((a, b) => b.rankScore - a.rankScore)
     .slice(0, 100);
 }

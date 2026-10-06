@@ -1331,10 +1331,13 @@ def director_report_top():
         values = [v for v in (att, additional) if v is not None]
         if not values:
             continue
+        rank_score = round(sum(values) / len(values), 1)
+        if rank_score <= 90:
+            continue
         people.append({
             "name": r["name"], "region": r["region"], "store": r["store"],
             "att": att, "additional": additional,
-            "rankScore": round(sum(values) / len(values), 1),
+            "rankScore": rank_score,
         })
     people.sort(key=lambda p: -p["rankScore"])
     return jsonify({"people": people[:100]})
