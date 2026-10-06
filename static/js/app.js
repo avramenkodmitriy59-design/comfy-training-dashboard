@@ -2514,6 +2514,12 @@ function renderDirectorReportContent() {
       <div class="table-scroll"><table class="data-table" id="dr-topics-table"></table></div>
     </div>
     <div class="card">
+      <h3>Низькі результати — історично</h3>
+      <p class="field-hint">Середній результат за всі квартали (мінімум 2 квартали в базі), а не лише за обраний період. Натисни на рядок для динаміки по кварталах.</p>
+      <div class="table-scroll"><table class="data-table" id="dr-historical-low-table"></table></div>
+      <div id="dr-historical-low-pagination"></div>
+    </div>
+    <div class="card">
       <h3>Антитоп — АТТ <span class="muted">(не завершили все)</span></h3>
       <div class="table-scroll"><table class="data-table" id="dr-worst-att-table"></table></div>
       <div id="dr-worst-att-pagination"></div>
@@ -2567,15 +2573,19 @@ async function refreshDirectorReportFilters() {
 async function refreshDirectorReportData() {
   const { year, quarter, region, store } = state.directorReport;
   const params = { year, quarter, region, store };
-  const [summary, topics, worstAtt, topAtt, worstAdditional, topAdditional] = await Promise.all([
+  const [summary, topics, worstAtt, topAtt, worstAdditional, topAdditional, historicalLow] = await Promise.all([
     api(`/api/director-report-summary?${qs(params)}`),
     api(`/api/director-report-topics?${qs(params)}`),
     api(`/api/director-report-worst?${qs({ ...params, type: 'АТТ' })}`),
     api(`/api/director-report-top?${qs({ ...params, type: 'АТТ' })}`),
     api(`/api/director-report-worst?${qs({ ...params, type: 'Додаткове навчання' })}`),
     api(`/api/director-report-top?${qs({ ...params, type: 'Додаткове навчання' })}`),
+    api(`/api/director-report-historical-low?${qs({ region, store })}`),
   ]);
   renderDirectorReportKpis(summary);
+  state._drHistoricalLow = historicalLow.people || [];
+  resetPageState('dr-historical-low');
+  renderDirectorReportHistoricalLow();
   document.getElementById('dr-regions-card').hidden = !!region;
   document.getElementById('dr-employees-card').hidden = !region;
   if (region) {
@@ -2675,6 +2685,68 @@ async function openDirectorEmployeeModal(employee) {
   }
 }
 
+function renderDirectorReportHistoricalLow() {
+  const rows = state._drHistoricalLow || [];
+  const key = 'dr-historical-low';
+  const table = document.getElementById('dr-historical-low-table');
+  const pageRows = pageSlice(key, rows);
+  table.innerHTML = `
+    <thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Кварталів</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead>
+    <tbody>${pageRows.map((p, i) => `
+      <tr class="row-clickable" data-idx="${i}">
+        <td>${escapeHtml(p.name)}</td>
+        <td>${escapeHtml(p.region)}</td>
+        <td>${escapeHtml(p.store)}</td>
+        <td>${fmtNum(p.quarterCount)}</td>
+        <td>${progressCellHtml(p.overall)}</td>
+        <td>${progressCellHtml(p.att)}</td>
+        <td>${progressCellHtml(p.additional)}</td>
+      </tr>`).join('') || `<tr><td colspan="7" class="muted">Немає даних — усі в базі лише один квартал</td></tr>`}</tbody>
+  `;
+  table.querySelectorAll('tbody tr[data-idx]').forEach((tr) => {
+    const p = pageRows[Number(tr.dataset.idx)];
+    tr.addEventListener('click', () => openDirectorHistoricalTrendModal(p));
+  });
+  const pager = document.getElementById('dr-historical-low-pagination');
+  pager.innerHTML = paginationBarHtml(key, rows.length);
+  wirePagination(pager, key, renderDirectorReportHistoricalLow);
+}
+
+async function openDirectorHistoricalTrendModal(person) {
+  const root = document.getElementById('modal-root');
+  root.innerHTML = `
+    <div class="modal-backdrop" id="dr-trend-backdrop">
+      <div class="modal" style="max-width:680px;">
+        <button class="modal-close" id="dr-trend-close">✕</button>
+        <h2>${escapeHtml(person.name)}</h2>
+        <p class="modal-subtitle">${escapeHtml(person.store)} · Середній за весь час ${fmtPct(person.overall)} (${fmtNum(person.quarterCount)} квартали)</p>
+        <div class="table-scroll"><table class="data-table" id="dr-trend-table">
+          <tbody><tr><td class="muted">Завантаження…</td></tr></tbody>
+        </table></div>
+      </div>
+    </div>
+  `;
+  document.getElementById('dr-trend-close').onclick = closeModal;
+  document.getElementById('dr-trend-backdrop').addEventListener('click', (e) => {
+    if (e.target.id === 'dr-trend-backdrop') closeModal();
+  });
+  const data = await api(`/api/director-report-historical-trend?${qs({ name: person.name })}`);
+  const quarters = data.quarters || [];
+  const table = document.getElementById('dr-trend-table');
+  if (table) {
+    table.innerHTML = `
+      <thead><tr><th>Квартал</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead>
+      <tbody>${quarters.map((q) => `
+        <tr>
+          <td>Q${q.quarter} ${q.year}</td>
+          <td>${progressCellHtml(q.overall)}</td>
+          <td>${progressCellHtml(q.att)}</td>
+          <td>${progressCellHtml(q.additional)}</td>
+        </tr>`).join('') || `<tr><td colspan="4" class="muted">Немає даних</td></tr>`}</tbody>
+    `;
+  }
+}
+
 function renderDirectorReportKpis(summary) {
   const tiles = [
     { label: 'Результат АТТ', value: fmtPct(summary.att), accent: 'green' },
@@ -2759,8 +2831,9 @@ async function downloadDirectorReportHtml() {
   const btn = document.getElementById('dr-download-html');
   if (btn) { btn.disabled = true; btn.textContent = 'Готую файл…'; }
   try {
-    const [rawData, css, logoDataUrl, comfySemiBold, ptRegular, ptMedium, ptBold] = await Promise.all([
+    const [rawData, allData, css, logoDataUrl, comfySemiBold, ptRegular, ptMedium, ptBold] = await Promise.all([
       api(`/api/director-report-raw?${qs({ year, quarter })}`),
+      api(`/api/director-report-raw-all`),
       fetch('/static/css/style.css').then((r) => r.text()).catch(() => ''),
       fetchAsDataUrl('/static/assets/logo_green.png'),
       fetchAsDataUrl('/static/fonts/ComfySemiBold/Comfy-Semi-Bold.woff2'),
@@ -2782,7 +2855,8 @@ async function downloadDirectorReportHtml() {
     // Guard against a topic/name containing a literal "</script>" breaking
     // out of the embedded data block.
     const rowsJson = JSON.stringify(rawData.rows || []).replace(/<\/script/gi, '<\\/script');
-    const html = buildDirectorReportExportHtml({ title, periodLabel, css: inlinedCss, logoDataUrl, rowsJson });
+    const allRowsJson = JSON.stringify(allData.rows || []).replace(/<\/script/gi, '<\\/script');
+    const html = buildDirectorReportExportHtml({ title, periodLabel, css: inlinedCss, logoDataUrl, rowsJson, allRowsJson });
     const blob = new Blob([html], { type: 'text/html' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -2799,7 +2873,7 @@ async function downloadDirectorReportHtml() {
   }
 }
 
-function buildDirectorReportExportHtml({ title, periodLabel, css, logoDataUrl, rowsJson }) {
+function buildDirectorReportExportHtml({ title, periodLabel, css, logoDataUrl, rowsJson, allRowsJson }) {
   return `<!doctype html>
 <html lang="uk"><head><meta charset="utf-8">
 <title>${escapeHtml(title)}</title>
@@ -2843,6 +2917,11 @@ body { background: var(--color-bg); padding: 24px; }
   <div class="table-scroll"><table class="data-table" id="x-topics"></table></div>
 </div>
 <div class="card">
+  <h3>Низькі результати — історично</h3>
+  <p class="field-hint">Середній результат за всі квартали (мінімум 2 квартали в базі), а не лише за обраний період. Натисни на рядок для динаміки по кварталах.</p>
+  <div class="table-scroll"><table class="data-table" id="x-historical-low"></table></div>
+</div>
+<div class="card">
   <h3>Антитоп — АТТ <span class="muted">(не завершили все)</span></h3>
   <div class="table-scroll"><table class="data-table" id="x-worst-att"></table></div>
 </div>
@@ -2861,6 +2940,7 @@ body { background: var(--color-bg); padding: 24px; }
 <script>
 'use strict';
 const ROWS = ${rowsJson};
+const ALL_ROWS = ${allRowsJson};
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -2932,6 +3012,51 @@ function byRegionOf(rows) {
   return regions.map((region) => ({ region, ...stats(rows.filter((r) => r.region === region)) }));
 }
 
+function historicalLowOf(region, store) {
+  const scoped = ALL_ROWS.filter((r) => r.name && (!region || r.region === region) && (!store || r.store === store));
+  const groups = {};
+  scoped.forEach((r) => {
+    const g = groups[r.name] = groups[r.name] || {
+      name: r.name, region: r.region, store: r.store, latestKey: -1, quarters: new Set(),
+      attSum: 0, attCount: 0, addSum: 0, addCount: 0, allSum: 0, allCount: 0,
+    };
+    const qkey = r.year * 10 + r.quarter;
+    g.quarters.add(qkey);
+    if (qkey > g.latestKey) { g.latestKey = qkey; g.region = r.region; g.store = r.store; }
+    g.allSum += r.score; g.allCount += 1;
+    if (r.trainingType === 'АТТ') { g.attSum += r.score; g.attCount += 1; }
+    else if (r.trainingType === 'Додаткове навчання') { g.addSum += r.score; g.addCount += 1; }
+  });
+  return Object.values(groups)
+    .filter((g) => g.quarters.size >= 2)
+    .map((g) => ({
+      name: g.name, region: g.region, store: g.store, quarterCount: g.quarters.size,
+      att: g.attCount ? g.attSum / g.attCount : null,
+      additional: g.addCount ? g.addSum / g.addCount : null,
+      overall: g.allCount ? g.allSum / g.allCount : null,
+    }))
+    .sort((a, b) => (a.overall ?? 999) - (b.overall ?? 999) || b.quarterCount - a.quarterCount)
+    .slice(0, 100);
+}
+function historicalTrendOf(name) {
+  const groups = {};
+  ALL_ROWS.filter((r) => r.name === name).forEach((r) => {
+    const key = r.year + '-' + r.quarter;
+    const g = groups[key] = groups[key] || { year: r.year, quarter: r.quarter, attSum: 0, attCount: 0, addSum: 0, addCount: 0, allSum: 0, allCount: 0 };
+    g.allSum += r.score; g.allCount += 1;
+    if (r.trainingType === 'АТТ') { g.attSum += r.score; g.attCount += 1; }
+    else if (r.trainingType === 'Додаткове навчання') { g.addSum += r.score; g.addCount += 1; }
+  });
+  return Object.values(groups)
+    .map((g) => ({
+      year: g.year, quarter: g.quarter,
+      att: g.attCount ? g.attSum / g.attCount : null,
+      additional: g.addCount ? g.addSum / g.addCount : null,
+      overall: g.allCount ? g.allSum / g.allCount : null,
+    }))
+    .sort((a, b) => a.year - b.year || a.quarter - b.quarter);
+}
+
 function filteredRows() {
   const region = document.getElementById('x-region').value;
   const store = document.getElementById('x-store').value;
@@ -3001,10 +3126,41 @@ function renderWorst(elId, people) {
     (people.map((p) => '<tr><td>' + esc(p.name) + '</td><td>' + esc(p.region) + '</td><td>' + esc(p.store) + '</td><td>' + p.passed + ' з ' + p.total + '</td><td>' + progressCell(p.rate) + '</td></tr>').join('')
       || '<tr><td colspan="5" class="muted">Немає даних</td></tr>') + '</tbody>';
 }
+function renderHistoricalLow(people) {
+  const el = document.getElementById('x-historical-low');
+  el.innerHTML =
+    '<thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Кварталів</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead><tbody>' +
+    (people.map((p, i) => '<tr class="row-clickable" data-idx="' + i + '"><td>' + esc(p.name) + '</td><td>' + esc(p.region) + '</td><td>' + esc(p.store) + '</td><td>' + p.quarterCount + '</td><td>' + progressCell(p.overall) + '</td><td>' + progressCell(p.att) + '</td><td>' + progressCell(p.additional) + '</td></tr>').join('')
+      || '<tr><td colspan="7" class="muted">Немає даних — усі в базі лише один квартал</td></tr>') + '</tbody>';
+  el.querySelectorAll('tbody tr[data-idx]').forEach((tr) => {
+    const p = people[Number(tr.dataset.idx)];
+    tr.addEventListener('click', () => openHistoricalTrendModal(p));
+  });
+}
+function openHistoricalTrendModal(person) {
+  const quarters = historicalTrendOf(person.name);
+  document.getElementById('x-modal-root').innerHTML =
+    '<div class="modal-backdrop" id="x-trend-backdrop">' +
+      '<div class="modal" style="max-width:680px;">' +
+        '<button class="modal-close" id="x-trend-close">✕</button>' +
+        '<h2>' + esc(person.name) + '</h2>' +
+        '<p class="modal-subtitle">' + esc(person.store) + ' · Середній за весь час ' + fmtPct(person.overall) + ' (' + person.quarterCount + ' квартали)</p>' +
+        '<div class="table-scroll"><table class="data-table"><thead><tr><th>Квартал</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead><tbody>' +
+        (quarters.map((q) => '<tr><td>Q' + q.quarter + ' ' + q.year + '</td><td>' + progressCell(q.overall) + '</td><td>' + progressCell(q.att) + '</td><td>' + progressCell(q.additional) + '</td></tr>').join('')
+          || '<tr><td colspan="4" class="muted">Немає даних</td></tr>') +
+        '</tbody></table></div>' +
+      '</div>' +
+    '</div>';
+  document.getElementById('x-trend-close').onclick = closeEmployeeModal;
+  document.getElementById('x-trend-backdrop').addEventListener('click', (e) => {
+    if (e.target.id === 'x-trend-backdrop') closeEmployeeModal();
+  });
+}
 
 function render() {
   const rows = filteredRows();
   const region = document.getElementById('x-region').value;
+  const store = document.getElementById('x-store').value;
   renderKpi(stats(rows));
   document.getElementById('x-regions-card').hidden = !!region;
   document.getElementById('x-employees-card').hidden = !region;
@@ -3014,6 +3170,7 @@ function render() {
     renderRegions(byRegionOf(ROWS));
   }
   renderTopics(topicsOf(rows));
+  renderHistoricalLow(historicalLowOf(region, store));
   renderWorst('x-worst-att', worstOf(rows, 'АТТ'));
   renderWorst('x-top-att', topOf(rows, 'АТТ'));
   renderWorst('x-worst-additional', worstOf(rows, 'Додаткове навчання'));

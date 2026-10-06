@@ -1058,6 +1058,118 @@ def director_report_raw():
     ]})
 
 
+@app.get("/api/director-report-raw-all")
+def director_report_raw_all():
+    """Every row across every uploaded quarter, unfiltered — used only by
+    the standalone HTML export to compute the "historically low" card
+    (and its per-person quarter trend) entirely offline, since that
+    analysis spans quarters rather than the one the export was taken
+    for."""
+    conn = db.get_db()
+    rows = conn.execute(
+        "SELECT period_year, period_quarter, training_type, region, store, name, score "
+        "FROM director_report_details"
+    ).fetchall()
+    conn.close()
+    return jsonify({"rows": [
+        {"year": r["period_year"], "quarter": r["period_quarter"], "trainingType": r["training_type"],
+         "region": r["region"], "store": r["store"], "name": r["name"], "score": r["score"]}
+        for r in rows
+    ]})
+
+
+def _director_report_historical_people(region=None, store=None):
+    """Per-director averages across EVERY uploaded quarter (not just the
+    one currently selected) — only people present in at least 2 distinct
+    quarters count, so a single bad quarter doesn't get flagged as a
+    historical pattern."""
+    clauses = ["name != ''"]
+    params = []
+    if region:
+        clauses.append("region=?")
+        params.append(region)
+    if store:
+        clauses.append("store=?")
+        params.append(store)
+    where = " AND ".join(clauses)
+    conn = db.get_db()
+    rows = conn.execute(
+        f"SELECT period_year, period_quarter, training_type, region, store, name, score "
+        f"FROM director_report_details WHERE {where}",
+        params,
+    ).fetchall()
+    conn.close()
+
+    people = {}
+    for r in rows:
+        p = people.setdefault(r["name"], {
+            "name": r["name"], "region": r["region"], "store": r["store"],
+            "latestKey": None, "quarters": set(),
+            "attSum": 0.0, "attCount": 0, "addSum": 0.0, "addCount": 0,
+            "allSum": 0.0, "allCount": 0,
+        })
+        qkey = (r["period_year"], r["period_quarter"])
+        p["quarters"].add(qkey)
+        if p["latestKey"] is None or qkey > p["latestKey"]:
+            p["latestKey"] = qkey
+            p["region"] = r["region"]
+            p["store"] = r["store"]
+        p["allSum"] += r["score"]
+        p["allCount"] += 1
+        if r["training_type"] == "АТТ":
+            p["attSum"] += r["score"]
+            p["attCount"] += 1
+        elif r["training_type"] == "Додаткове навчання":
+            p["addSum"] += r["score"]
+            p["addCount"] += 1
+
+    result = []
+    for p in people.values():
+        if len(p["quarters"]) < 2:
+            continue
+        result.append({
+            "name": p["name"], "region": p["region"], "store": p["store"],
+            "quarterCount": len(p["quarters"]),
+            "att": round(p["attSum"] / p["attCount"], 1) if p["attCount"] else None,
+            "additional": round(p["addSum"] / p["addCount"], 1) if p["addCount"] else None,
+            "overall": round(p["allSum"] / p["allCount"], 1) if p["allCount"] else None,
+        })
+    return result
+
+
+@app.get("/api/director-report-historical-low")
+def director_report_historical_low():
+    people = _director_report_historical_people(request.args.get("region"), request.args.get("store"))
+    people.sort(key=lambda p: (p["overall"] if p["overall"] is not None else 999, -p["quarterCount"]))
+    return jsonify({"people": people[:100]})
+
+
+@app.get("/api/director-report-historical-trend")
+def director_report_historical_trend():
+    """Per-quarter breakdown for one director — the drill-down behind a
+    row in the historically-low table."""
+    name = request.args.get("name")
+    if not name:
+        return jsonify({"error": "name обов'язкове"}), 400
+    conn = db.get_db()
+    rows = conn.execute(
+        "SELECT period_year, period_quarter, "
+        "AVG(CASE WHEN training_type='АТТ' THEN score END) AS att, "
+        "AVG(CASE WHEN training_type='Додаткове навчання' THEN score END) AS additional, "
+        "AVG(score) AS overall "
+        "FROM director_report_details WHERE name=? "
+        "GROUP BY period_year, period_quarter ORDER BY period_year, period_quarter",
+        (name,),
+    ).fetchall()
+    conn.close()
+    return jsonify({"quarters": [{
+        "year": r["period_year"], "quarter": r["period_quarter"],
+        "att": round(r["att"], 1) if r["att"] is not None else None,
+        "additional": round(r["additional"], 1) if r["additional"] is not None else None,
+        "overall": round(r["overall"], 1) if r["overall"] is not None else None,
+    } for r in rows]})
+
+
 @app.get("/api/director-report-summary")
 def director_report_summary():
     year, quarter = request.args.get("year"), request.args.get("quarter")
