@@ -2505,6 +2505,7 @@ function renderDirectorReportContent() {
     </div>
     <div class="card" id="dr-employees-card" hidden>
       <h3>По співробітниках</h3>
+      <p class="field-hint">Натисни на рядок для деталізації по темах.</p>
       <div class="table-scroll"><table class="data-table" id="dr-employees-table"></table></div>
       <div id="dr-employees-pagination"></div>
     </div>
@@ -2834,6 +2835,7 @@ body { background: var(--color-bg); padding: 24px; }
 </div>
 <div class="card" id="x-employees-card" hidden>
   <h3>По співробітниках</h3>
+  <p class="field-hint">Натисни на рядок для деталізації по темах.</p>
   <div class="table-scroll"><table class="data-table" id="x-employees"></table></div>
 </div>
 <div class="card">
