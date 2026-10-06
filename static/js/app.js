@@ -2498,10 +2498,15 @@ function renderDirectorReportContent() {
       </div>
     </div>
     <div class="kpi-grid" id="dr-kpi-grid"></div>
-    <div class="card">
+    <div class="card" id="dr-regions-card">
       <h3>По регіонах</h3>
       <p class="field-hint">Завжди всі регіони, незалежно від фільтра вище — для огляду по мережі одразу.</p>
       <div class="table-scroll"><table class="data-table" id="dr-regions-table"></table></div>
+    </div>
+    <div class="card" id="dr-employees-card" hidden>
+      <h3>По співробітниках</h3>
+      <div class="table-scroll"><table class="data-table" id="dr-employees-table"></table></div>
+      <div id="dr-employees-pagination"></div>
     </div>
     <div class="card">
       <h3>Результат по темам</h3>
@@ -2549,15 +2554,24 @@ async function refreshDirectorReportFilters() {
 async function refreshDirectorReportData() {
   const { year, quarter, region, store } = state.directorReport;
   const params = { year, quarter, region, store };
-  const [summary, byRegion, topics, worstAtt, worstAdditional] = await Promise.all([
+  const [summary, topics, worstAtt, worstAdditional] = await Promise.all([
     api(`/api/director-report-summary?${qs(params)}`),
-    api(`/api/director-report-by-region?${qs({ year, quarter })}`),
     api(`/api/director-report-topics?${qs(params)}`),
     api(`/api/director-report-worst?${qs({ ...params, type: 'АТТ' })}`),
     api(`/api/director-report-worst?${qs({ ...params, type: 'Додаткове навчання' })}`),
   ]);
   renderDirectorReportKpis(summary);
-  renderDirectorReportByRegion(byRegion.regions || []);
+  document.getElementById('dr-regions-card').hidden = !!region;
+  document.getElementById('dr-employees-card').hidden = !region;
+  if (region) {
+    const byEmployee = await api(`/api/director-report-by-employee?${qs(params)}`);
+    state._drEmployees = byEmployee.employees || [];
+    resetPageState('dr-employees');
+    renderDirectorReportEmployees();
+  } else {
+    const byRegion = await api(`/api/director-report-by-region?${qs({ year, quarter })}`);
+    renderDirectorReportByRegion(byRegion.regions || []);
+  }
   renderDirectorReportTopics(topics.topics || []);
   state._drWorstAtt = worstAtt.people || [];
   resetPageState('dr-worst-att');
@@ -2570,16 +2584,36 @@ async function refreshDirectorReportData() {
 function renderDirectorReportByRegion(regions) {
   const table = document.getElementById('dr-regions-table');
   table.innerHTML = `
-    <thead><tr><th>Регіон</th><th>АТТ</th><th>Додаткове навчання</th><th>Загальний результат</th><th>% залученості</th></tr></thead>
+    <thead><tr><th>Регіон</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead>
     <tbody>${regions.map((r) => `
       <tr>
         <td>${escapeHtml(r.region)}</td>
+        <td>${progressCellHtml(r.overall)}</td>
         <td>${progressCellHtml(r.att)}</td>
         <td>${progressCellHtml(r.additional)}</td>
-        <td>${progressCellHtml(r.overall)}</td>
-        <td>${progressCellHtml(r.completionRate)}</td>
+      </tr>`).join('') || `<tr><td colspan="4" class="muted">Немає даних</td></tr>`}</tbody>
+  `;
+}
+
+function renderDirectorReportEmployees() {
+  const rows = state._drEmployees || [];
+  const key = 'dr-employees';
+  const table = document.getElementById('dr-employees-table');
+  const pageRows = pageSlice(key, rows);
+  table.innerHTML = `
+    <thead><tr><th>ПІБ</th><th>Магазин</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead>
+    <tbody>${pageRows.map((e) => `
+      <tr>
+        <td>${escapeHtml(e.name)}</td>
+        <td>${escapeHtml(e.store)}</td>
+        <td>${progressCellHtml(e.overall)}</td>
+        <td>${progressCellHtml(e.att)}</td>
+        <td>${progressCellHtml(e.additional)}</td>
       </tr>`).join('') || `<tr><td colspan="5" class="muted">Немає даних</td></tr>`}</tbody>
   `;
+  const pager = document.getElementById('dr-employees-pagination');
+  pager.innerHTML = paginationBarHtml(key, rows.length);
+  wirePagination(pager, key, renderDirectorReportEmployees);
 }
 
 function renderDirectorReportKpis(summary) {
@@ -2587,7 +2621,6 @@ function renderDirectorReportKpis(summary) {
     { label: 'Результат АТТ', value: fmtPct(summary.att), accent: 'green' },
     { label: 'Результат додаткового навчання', value: fmtPct(summary.additional), accent: 'green' },
     { label: 'Загальний результат', value: fmtPct(summary.overall), accent: '' },
-    { label: '% залученості', value: fmtPct(summary.completionRate), accent: '' },
   ];
   document.getElementById('dr-kpi-grid').innerHTML = tiles.map((tl) => `
     <div class="kpi-tile ${tl.accent ? `accent-${tl.accent}` : ''}">
@@ -2692,10 +2725,14 @@ body { background: var(--color-bg); padding: 24px; }
   </div>
 </div>
 <div class="kpi-grid" id="x-kpi"></div>
-<div class="card">
+<div class="card" id="x-regions-card">
   <h3>По регіонах</h3>
   <p class="field-hint">Завжди всі регіони, незалежно від фільтра вище.</p>
   <div class="table-scroll"><table class="data-table" id="x-regions"></table></div>
+</div>
+<div class="card" id="x-employees-card" hidden>
+  <h3>По співробітниках</h3>
+  <div class="table-scroll"><table class="data-table" id="x-employees"></table></div>
 </div>
 <div class="card">
   <h3>Результат по темам</h3>
@@ -2731,11 +2768,17 @@ function stats(rows) {
   const att = rows.filter((r) => r.trainingType === 'АТТ').map((r) => r.score);
   const additional = rows.filter((r) => r.trainingType === 'Додаткове навчання').map((r) => r.score);
   const all = rows.map((r) => r.score);
-  const passed = all.filter((s) => s > 0).length;
-  return {
-    att: avg(att), additional: avg(additional), overall: avg(all),
-    completionRate: all.length ? (passed / all.length) * 100 : null,
-  };
+  return { att: avg(att), additional: avg(additional), overall: avg(all) };
+}
+function employeesOf(rows) {
+  const groups = {};
+  rows.filter((r) => r.name).forEach((r) => {
+    const key = r.name + '|' + r.store;
+    (groups[key] = groups[key] || { name: r.name, store: r.store, rows: [] }).rows.push(r);
+  });
+  return Object.values(groups)
+    .map((g) => ({ name: g.name, store: g.store, ...stats(g.rows) }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'uk'));
 }
 function topicsOf(rows) {
   const groups = {};
@@ -2776,7 +2819,6 @@ function renderKpi(s) {
     ['Результат АТТ', fmtPct(s.att), 'accent-green'],
     ['Результат додаткового навчання', fmtPct(s.additional), 'accent-green'],
     ['Загальний результат', fmtPct(s.overall), ''],
-    ['% залученості', fmtPct(s.completionRate), ''],
   ];
   document.getElementById('x-kpi').innerHTML = tiles.map((t) =>
     '<div class="kpi-tile ' + t[2] + '"><div class="kpi-value">' + t[1] + '</div><div class="kpi-label">' + esc(t[0]) + '</div></div>'
@@ -2784,8 +2826,14 @@ function renderKpi(s) {
 }
 function renderRegions(regions) {
   document.getElementById('x-regions').innerHTML =
-    '<thead><tr><th>Регіон</th><th>АТТ</th><th>Додаткове навчання</th><th>Загальний результат</th><th>% залученості</th></tr></thead><tbody>' +
-    (regions.map((r) => '<tr><td>' + esc(r.region) + '</td><td>' + progressCell(r.att) + '</td><td>' + progressCell(r.additional) + '</td><td>' + progressCell(r.overall) + '</td><td>' + progressCell(r.completionRate) + '</td></tr>').join('')
+    '<thead><tr><th>Регіон</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead><tbody>' +
+    (regions.map((r) => '<tr><td>' + esc(r.region) + '</td><td>' + progressCell(r.overall) + '</td><td>' + progressCell(r.att) + '</td><td>' + progressCell(r.additional) + '</td></tr>').join('')
+      || '<tr><td colspan="4" class="muted">Немає даних</td></tr>') + '</tbody>';
+}
+function renderEmployees(employees) {
+  document.getElementById('x-employees').innerHTML =
+    '<thead><tr><th>ПІБ</th><th>Магазин</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead><tbody>' +
+    (employees.map((e) => '<tr><td>' + esc(e.name) + '</td><td>' + esc(e.store) + '</td><td>' + progressCell(e.overall) + '</td><td>' + progressCell(e.att) + '</td><td>' + progressCell(e.additional) + '</td></tr>').join('')
       || '<tr><td colspan="5" class="muted">Немає даних</td></tr>') + '</tbody>';
 }
 function renderTopics(topics) {
@@ -2803,7 +2851,15 @@ function renderWorst(elId, people) {
 
 function render() {
   const rows = filteredRows();
+  const region = document.getElementById('x-region').value;
   renderKpi(stats(rows));
+  document.getElementById('x-regions-card').hidden = !!region;
+  document.getElementById('x-employees-card').hidden = !region;
+  if (region) {
+    renderEmployees(employeesOf(rows));
+  } else {
+    renderRegions(byRegionOf(ROWS));
+  }
   renderTopics(topicsOf(rows));
   renderWorst('x-worst-att', worstOf(rows, 'АТТ'));
   renderWorst('x-worst-additional', worstOf(rows, 'Додаткове навчання'));
@@ -2825,7 +2881,6 @@ function populateFilters() {
 }
 
 populateFilters();
-renderRegions(byRegionOf(ROWS));
 render();
 </script>
 </body></html>`;

@@ -1067,8 +1067,7 @@ def director_report_summary():
             w += " AND training_type=?"
             p.append(training_type)
         return conn.execute(
-            f"SELECT AVG(score) AS avg, COUNT(*) AS c, "
-            f"SUM(CASE WHEN score > 0 THEN 1 ELSE 0 END) AS passed FROM director_report_details WHERE {w}",
+            f"SELECT AVG(score) AS avg, COUNT(*) AS c FROM director_report_details WHERE {w}",
             p,
         ).fetchone()
 
@@ -1076,12 +1075,10 @@ def director_report_summary():
     additional = avg_for("Додаткове навчання")
     overall = avg_for(None)
     conn.close()
-    completion_rate = round((overall["passed"] / overall["c"]) * 100, 1) if overall["c"] else None
     return jsonify({
         "att": round(att["avg"], 1) if att["avg"] is not None else None,
         "additional": round(additional["avg"], 1) if additional["avg"] is not None else None,
         "overall": round(overall["avg"], 1) if overall["avg"] is not None else None,
-        "completionRate": completion_rate,
         "count": overall["c"],
     })
 
@@ -1099,8 +1096,7 @@ def director_report_by_region():
         "SELECT region, "
         "AVG(CASE WHEN training_type='АТТ' THEN score END) AS att, "
         "AVG(CASE WHEN training_type='Додаткове навчання' THEN score END) AS additional, "
-        "AVG(score) AS overall, "
-        "SUM(CASE WHEN score > 0 THEN 1 ELSE 0 END) AS passed, COUNT(*) AS total "
+        "AVG(score) AS overall "
         "FROM director_report_details WHERE period_year=? AND period_quarter=? AND region != '' "
         "GROUP BY region ORDER BY region",
         (year, quarter),
@@ -1111,7 +1107,36 @@ def director_report_by_region():
         "att": round(r["att"], 1) if r["att"] is not None else None,
         "additional": round(r["additional"], 1) if r["additional"] is not None else None,
         "overall": round(r["overall"], 1) if r["overall"] is not None else None,
-        "completionRate": round((r["passed"] / r["total"]) * 100, 1) if r["total"] else None,
+    } for r in rows]})
+
+
+@app.get("/api/director-report-by-employee")
+def director_report_by_employee():
+    """Per-employee breakdown within the selected region (and optionally
+    store) — shown instead of the by-region table once a region is picked,
+    since "all regions at a glance" stops being the useful view at that
+    point."""
+    year, quarter = request.args.get("year"), request.args.get("quarter")
+    if not year or not quarter:
+        return jsonify({"error": "year і quarter обов'язкові"}), 400
+    where, params = _director_report_where(request.args)
+    conn = db.get_db()
+    rows = conn.execute(
+        f"SELECT name, store, "
+        f"AVG(CASE WHEN training_type='АТТ' THEN score END) AS att, "
+        f"AVG(CASE WHEN training_type='Додаткове навчання' THEN score END) AS additional, "
+        f"AVG(score) AS overall "
+        f"FROM director_report_details WHERE {where} AND name != '' "
+        f"GROUP BY name, store ORDER BY name",
+        params,
+    ).fetchall()
+    conn.close()
+    return jsonify({"employees": [{
+        "name": r["name"],
+        "store": r["store"],
+        "att": round(r["att"], 1) if r["att"] is not None else None,
+        "additional": round(r["additional"], 1) if r["additional"] is not None else None,
+        "overall": round(r["overall"], 1) if r["overall"] is not None else None,
     } for r in rows]})
 
 
