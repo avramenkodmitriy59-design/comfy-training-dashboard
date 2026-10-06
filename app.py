@@ -1030,6 +1030,29 @@ def _director_report_where(args):
     return " AND ".join(clauses), params
 
 
+@app.get("/api/director-report-raw")
+def director_report_raw():
+    """All rows for one quarter, unfiltered — used only by the client-side
+    HTML export (downloadDirectorReportHtml), which bakes them into the
+    downloaded file so region/store filtering keeps working with zero
+    server round trips once it's out of the browser."""
+    year, quarter = request.args.get("year"), request.args.get("quarter")
+    if not year or not quarter:
+        return jsonify({"error": "year і quarter обов'язкові"}), 400
+    conn = db.get_db()
+    rows = conn.execute(
+        "SELECT topic, training_type, region, store, name, score FROM director_report_details "
+        "WHERE period_year=? AND period_quarter=?",
+        (year, quarter),
+    ).fetchall()
+    conn.close()
+    return jsonify({"rows": [
+        {"topic": r["topic"], "trainingType": r["training_type"], "region": r["region"],
+         "store": r["store"], "name": r["name"], "score": r["score"]}
+        for r in rows
+    ]})
+
+
 @app.get("/api/director-report-summary")
 def director_report_summary():
     year, quarter = request.args.get("year"), request.args.get("quarter")

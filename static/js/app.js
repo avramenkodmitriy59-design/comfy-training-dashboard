@@ -2634,29 +2634,45 @@ function renderDirectorReportWorstTable(kind) {
 // the stylesheet, and trigger a download — so it can be opened/forwarded
 // without access to the site at all (the original ask behind this whole
 // feature). No server round trip, no extra route.
+// Unlike the old "photograph the current screen" approach, this bakes ALL
+// of the quarter's raw rows into the file and ships a small self-contained
+// script that redoes the same aggregation the backend does — so region/
+// store filtering (and the full antitop lists, not just the visible
+// pagination page) keep working offline, with zero server round trips,
+// once the file has left the browser.
 async function downloadDirectorReportHtml() {
-  const content = document.getElementById('dr-content-area');
-  if (!content) return;
-  let css = '';
+  const { year, quarter } = state.directorReport;
+  const btn = document.getElementById('dr-download-html');
+  if (btn) { btn.disabled = true; btn.textContent = 'Готую файл…'; }
   try {
-    const res = await fetch('/static/css/style.css');
-    css = await res.text();
-  } catch (e) { /* ship without styles rather than fail the whole export */ }
-  const { year, quarter, region, store } = state.directorReport;
-  const periodLabel = `Q${quarter} ${year}`;
-  const scopeLabel = [region, store].filter(Boolean).join(' / ') || 'усі магазини';
-  const title = `Звіт для РК — ${periodLabel} — ${scopeLabel}`;
-  const clone = content.cloneNode(true);
-  // Interactive bits (sort headers, pagination buttons) don't do anything in
-  // a standalone file — drop them so the export doesn't look half-broken.
-  clone.querySelectorAll('[id$="-pagination"]').forEach((n) => n.remove());
-  clone.querySelectorAll('select').forEach((s) => {
-    const span = document.createElement('div');
-    span.className = 'field-hint';
-    span.textContent = s.selectedOptions[0]?.textContent || '';
-    s.replaceWith(span);
-  });
-  const html = `<!doctype html>
+    const [rawData, css] = await Promise.all([
+      api(`/api/director-report-raw?${qs({ year, quarter })}`),
+      fetch('/static/css/style.css').then((r) => r.text()).catch(() => ''),
+    ]);
+    const periodLabel = `Q${quarter} ${year}`;
+    const title = `Звіт для РК — ${periodLabel}`;
+    // Guard against a topic/name containing a literal "</script>" breaking
+    // out of the embedded data block.
+    const rowsJson = JSON.stringify(rawData.rows || []).replace(/<\/script/gi, '<\\/script');
+    const html = buildDirectorReportExportHtml({ title, periodLabel, css, rowsJson });
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Звіт для РК - ${periodLabel}.html`.replace(/[\\/:*?"<>|]/g, '_');
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    showToast(`Не вдалося згенерувати файл: ${e.message}`, true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Завантажити HTML'; }
+  }
+}
+
+function buildDirectorReportExportHtml({ title, periodLabel, css, rowsJson }) {
+  return `<!doctype html>
 <html lang="uk"><head><meta charset="utf-8">
 <title>${escapeHtml(title)}</title>
 <style>${css}
@@ -2665,17 +2681,154 @@ body { background: var(--color-bg); padding: 24px; }
 </head><body>
 <h1 style="font-family:var(--font-heading); margin-bottom:4px;">${escapeHtml(title)}</h1>
 <p class="muted" style="margin-bottom:20px;">Знято ${new Date().toLocaleDateString('uk-UA')}</p>
-${clone.outerHTML}
+<div class="filters" id="x-filters">
+  <div class="filter-field">
+    <label>Регіон</label>
+    <select id="x-region"><option value="">Усі регіони</option></select>
+  </div>
+  <div class="filter-field">
+    <label>Магазин</label>
+    <select id="x-store"><option value="">Усі магазини</option></select>
+  </div>
+</div>
+<div class="kpi-grid" id="x-kpi"></div>
+<div class="card">
+  <h3>По регіонах</h3>
+  <p class="field-hint">Завжди всі регіони, незалежно від фільтра вище.</p>
+  <div class="table-scroll"><table class="data-table" id="x-regions"></table></div>
+</div>
+<div class="card">
+  <h3>Результат по темам</h3>
+  <div class="table-scroll"><table class="data-table" id="x-topics"></table></div>
+</div>
+<div class="card">
+  <h3>Антитоп — АТТ <span class="muted">(найгірша залученість)</span></h3>
+  <div class="table-scroll"><table class="data-table" id="x-worst-att"></table></div>
+</div>
+<div class="card">
+  <h3>Антитоп — Додаткове навчання <span class="muted">(найгірша залученість)</span></h3>
+  <div class="table-scroll"><table class="data-table" id="x-worst-additional"></table></div>
+</div>
+<script>
+'use strict';
+const ROWS = ${rowsJson};
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function fmtPct(v) { return v === null || v === undefined || Number.isNaN(v) ? '—' : (Math.round(v * 10) / 10) + '%'; }
+function bucket(v) {
+  if (v === null || v === undefined || Number.isNaN(v)) return 'red';
+  if (v >= 90) return 'good'; if (v >= 70) return 'yellow'; if (v >= 40) return 'orange'; return 'red';
+}
+function progressCell(v) {
+  const pct = Math.max(0, Math.min(100, v || 0));
+  return '<div class="progress-cell"><div class="progress-bar-track"><div class="progress-bar-fill fill-' + bucket(v) + '" style="width:' + pct + '%"></div></div><div class="value">' + fmtPct(v) + '</div></div>';
+}
+function avg(arr) { return arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : null; }
+
+function stats(rows) {
+  const att = rows.filter((r) => r.trainingType === 'АТТ').map((r) => r.score);
+  const additional = rows.filter((r) => r.trainingType === 'Додаткове навчання').map((r) => r.score);
+  const all = rows.map((r) => r.score);
+  const passed = all.filter((s) => s > 0).length;
+  return {
+    att: avg(att), additional: avg(additional), overall: avg(all),
+    completionRate: all.length ? (passed / all.length) * 100 : null,
+  };
+}
+function topicsOf(rows) {
+  const groups = {};
+  rows.forEach((r) => {
+    const key = r.topic + '|' + r.trainingType;
+    (groups[key] = groups[key] || { topic: r.topic, trainingType: r.trainingType, scores: [] }).scores.push(r.score);
+  });
+  return Object.values(groups)
+    .map((g) => ({ topic: g.topic, trainingType: g.trainingType, avg: avg(g.scores) }))
+    .sort((a, b) => a.trainingType.localeCompare(b.trainingType) || a.topic.localeCompare(b.topic, 'uk'));
+}
+function worstOf(rows, type) {
+  const groups = {};
+  rows.filter((r) => r.trainingType === type && r.name).forEach((r) => {
+    const key = r.name + '|' + r.region + '|' + r.store;
+    const g = groups[key] = groups[key] || { name: r.name, region: r.region, store: r.store, passed: 0, total: 0 };
+    g.total += 1;
+    if (r.score > 0) g.passed += 1;
+  });
+  return Object.values(groups)
+    .map((g) => ({ ...g, rate: g.total ? (g.passed / g.total) * 100 : 0 }))
+    .sort((a, b) => a.rate - b.rate || b.total - a.total)
+    .slice(0, 100);
+}
+function byRegionOf(rows) {
+  const regions = [...new Set(rows.map((r) => r.region).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'uk'));
+  return regions.map((region) => ({ region, ...stats(rows.filter((r) => r.region === region)) }));
+}
+
+function filteredRows() {
+  const region = document.getElementById('x-region').value;
+  const store = document.getElementById('x-store').value;
+  return ROWS.filter((r) => (!region || r.region === region) && (!store || r.store === store));
+}
+
+function renderKpi(s) {
+  const tiles = [
+    ['Результат АТТ', fmtPct(s.att), 'accent-green'],
+    ['Результат додаткового навчання', fmtPct(s.additional), 'accent-green'],
+    ['Загальний результат', fmtPct(s.overall), ''],
+    ['% залученості', fmtPct(s.completionRate), ''],
+  ];
+  document.getElementById('x-kpi').innerHTML = tiles.map((t) =>
+    '<div class="kpi-tile ' + t[2] + '"><div class="kpi-value">' + t[1] + '</div><div class="kpi-label">' + esc(t[0]) + '</div></div>'
+  ).join('');
+}
+function renderRegions(regions) {
+  document.getElementById('x-regions').innerHTML =
+    '<thead><tr><th>Регіон</th><th>АТТ</th><th>Додаткове навчання</th><th>Загальний результат</th><th>% залученості</th></tr></thead><tbody>' +
+    (regions.map((r) => '<tr><td>' + esc(r.region) + '</td><td>' + progressCell(r.att) + '</td><td>' + progressCell(r.additional) + '</td><td>' + progressCell(r.overall) + '</td><td>' + progressCell(r.completionRate) + '</td></tr>').join('')
+      || '<tr><td colspan="5" class="muted">Немає даних</td></tr>') + '</tbody>';
+}
+function renderTopics(topics) {
+  document.getElementById('x-topics').innerHTML =
+    '<thead><tr><th>Тема</th><th>Тип</th><th>Середній бал</th></tr></thead><tbody>' +
+    (topics.map((t) => '<tr><td>' + esc(t.topic) + '</td><td>' + esc(t.trainingType) + '</td><td>' + progressCell(t.avg) + '</td></tr>').join('')
+      || '<tr><td colspan="3" class="muted">Немає даних</td></tr>') + '</tbody>';
+}
+function renderWorst(elId, people) {
+  document.getElementById(elId).innerHTML =
+    '<thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Відвідано</th><th>% залученості</th></tr></thead><tbody>' +
+    (people.map((p) => '<tr><td>' + esc(p.name) + '</td><td>' + esc(p.region) + '</td><td>' + esc(p.store) + '</td><td>' + p.passed + ' з ' + p.total + '</td><td>' + progressCell(p.rate) + '</td></tr>').join('')
+      || '<tr><td colspan="5" class="muted">Немає даних</td></tr>') + '</tbody>';
+}
+
+function render() {
+  const rows = filteredRows();
+  renderKpi(stats(rows));
+  renderTopics(topicsOf(rows));
+  renderWorst('x-worst-att', worstOf(rows, 'АТТ'));
+  renderWorst('x-worst-additional', worstOf(rows, 'Додаткове навчання'));
+}
+
+function populateFilters() {
+  const regionSelect = document.getElementById('x-region');
+  const storeSelect = document.getElementById('x-store');
+  const regions = [...new Set(ROWS.map((r) => r.region).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'uk'));
+  regionSelect.innerHTML = '<option value="">Усі регіони</option>' + regions.map((r) => '<option value="' + esc(r) + '">' + esc(r) + '</option>').join('');
+  function refreshStoreOptions() {
+    const region = regionSelect.value;
+    const stores = [...new Set(ROWS.filter((r) => !region || r.region === region).map((r) => r.store).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'uk'));
+    storeSelect.innerHTML = '<option value="">Усі магазини</option>' + stores.map((s) => '<option value="' + esc(s) + '">' + esc(s) + '</option>').join('');
+  }
+  refreshStoreOptions();
+  regionSelect.addEventListener('change', () => { storeSelect.value = ''; refreshStoreOptions(); render(); });
+  storeSelect.addEventListener('change', render);
+}
+
+populateFilters();
+renderRegions(byRegionOf(ROWS));
+render();
+</script>
 </body></html>`;
-  const blob = new Blob([html], { type: 'text/html' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `Звіт для РК - ${periodLabel} - ${scopeLabel}.html`.replace(/[\\/:*?"<>|]/g, '_');
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
 }
 
 /* ===================== init ===================== */
