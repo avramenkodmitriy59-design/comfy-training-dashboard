@@ -2935,7 +2935,7 @@ function employeesOf(rows) {
   });
   return Object.values(groups)
     .map((g) => ({ name: g.name, store: g.store, ...stats(g.rows) }))
-    .sort((a, b) => a.name.localeCompare(b.name, 'uk'));
+    .sort((a, b) => (b.overall ?? -1) - (a.overall ?? -1));
 }
 function topicsOf(rows) {
   const groups = {};

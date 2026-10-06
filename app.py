@@ -1248,7 +1248,7 @@ def director_report_by_employee():
         f"AVG(CASE WHEN training_type='Додаткове навчання' THEN score END) AS additional, "
         f"AVG(score) AS overall "
         f"FROM director_report_details WHERE {where} AND name != '' "
-        f"GROUP BY name, store ORDER BY name",
+        f"GROUP BY name, store ORDER BY overall DESC",
         params,
     ).fetchall()
     conn.close()
