@@ -262,6 +262,18 @@ a { color: var(--color-green-dark); }
 .kpi-tile.accent-yellow .kpi-value { color: var(--color-yellow); }
 .kpi-tile.accent-muted { opacity: 0.85; }
 
+/* Director report has only 3 KPI tiles (vs the main dashboard's 7+), so
+   it gets its own column count and larger value text instead of leaving
+   an empty 4th column. */
+#dr-kpi-grid, #x-kpi {
+  grid-template-columns: repeat(3, 1fr);
+}
+#dr-kpi-grid .kpi-value, #x-kpi .kpi-value { font-size: 38px; }
+#dr-kpi-grid .kpi-label, #x-kpi .kpi-label { font-size: 14px; }
+@media (max-width: 860px) {
+  #dr-kpi-grid, #x-kpi { grid-template-columns: 1fr; }
+}
+
 /* ---------- Cards / grid ---------- */
 
 .grid-2 {
