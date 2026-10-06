@@ -46,6 +46,7 @@ const state = {
   details: { rows: [], total: 0, shown: 0 },
   charts: {},
   loading: false,
+  directorReport: { year: null, quarter: null, region: '', store: '', periods: [] },
 };
 
 /* ===================== utils ===================== */
@@ -501,6 +502,61 @@ async function readAepRosterWorkbookRows(file) {
   return extractAepRosterRows(sheetRows);
 }
 
+// "Звіт для РК" source — "Деталізація" sheet: one row per topic per
+// director per quarter (Період | Тема | begin | end | Тест | Регіон |
+// Магазин | Посада | Співробітник | Тип навчання). year/quarter are
+// resolved from `begin` client-side, same as AEP — the sheet's own
+// "Період" text column (Q1/Q2/Q3) is just a label, not reparsed.
+function stripDirectorTopicPrefix(topic) {
+  // "6. 📅 Управління кредитом (Керівники)" -> "Управління кредитом (Керівники)"
+  return String(topic).replace(/^\s*\d+\.\s*/, '').replace(/^\s*📅\s*/u, '').trim();
+}
+
+function extractDirectorReportRows(sheetRows) {
+  if (!sheetRows || sheetRows.length < 2) return [];
+  const cols = (sheetRows[0] || []).map((c) => String(c || '').trim());
+  const idx = {
+    topic: cols.indexOf('Тема'),
+    begin: cols.indexOf('begin'),
+    score: cols.indexOf('Тест'),
+    region: cols.indexOf('Регіон'),
+    store: cols.indexOf('Магазин'),
+    position: cols.indexOf('Посада'),
+    name: cols.indexOf('Співробітник'),
+    type: cols.indexOf('Тип навчання'),
+  };
+  if (idx.topic === -1 || idx.begin === -1 || idx.score === -1 || idx.type === -1) {
+    throw new Error('Не знайдено потрібні колонки на аркуші «Деталізація» (Тема, begin, Тест, Тип навчання)');
+  }
+  const rows = [];
+  for (let i = 1; i < sheetRows.length; i++) {
+    const row = sheetRows[i];
+    if (!row || !row[idx.topic]) continue;
+    const d = parseAepDate(row[idx.begin]);
+    if (!d) continue;
+    rows.push({
+      topic: stripDirectorTopicPrefix(row[idx.topic]),
+      trainingType: String(row[idx.type] || '').trim(),
+      region: String(row[idx.region] || '').trim(),
+      store: String(row[idx.store] || '').trim(),
+      position: String(row[idx.position] || '').trim(),
+      name: String(row[idx.name] || '').trim(),
+      score: parseNum(row[idx.score]),
+      year: d.getFullYear(),
+      quarter: aepQuarterOf(d),
+    });
+  }
+  return rows;
+}
+
+async function readDirectorReportWorkbookRows(file) {
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+  const sheet = findSheet(wb, 'Деталізація') || wb.Sheets[wb.SheetNames[0]];
+  const sheetRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: true });
+  return extractDirectorReportRows(sheetRows);
+}
+
 function detectAttestationPositionClient(rows) {
   const counts = {};
   rows.forEach((r) => { if (r.position) counts[r.position] = (counts[r.position] || 0) + 1; });
@@ -588,6 +644,8 @@ async function loadStreams() {
   }
   state.aepAvailable = !!data.aepAvailable;
   state.aepLastUpdated = data.aepLastUpdated || null;
+  const drData = await api('/api/director-report-last-updated');
+  state.directorReportLastUpdated = drData.lastUpdated || null;
   if (state.selectedProjectKind === 'aep' && !state.aepAvailable) {
     state.selectedProjectKind = 'project';
   }
@@ -645,6 +703,8 @@ function bindTabs() {
 }
 
 function renderPositionSwitch() {
+  const reportBtn = document.getElementById('btn-director-report');
+  if (reportBtn) reportBtn.hidden = state.tab !== 'overall';
   const el = document.getElementById('position-switch');
   if (state.tab === 'attestation') {
     el.hidden = false;
@@ -1956,10 +2016,11 @@ function openUploadModal() {
     if (e.target.id === 'upload-backdrop') closeModal();
   });
   document.getElementById('up-project-select').addEventListener('change', (e) => {
-    document.getElementById('up-project-name-new').style.display = e.target.value === '__new__' ? '' : 'none';
-    document.getElementById('up-aep-files').style.display = e.target.value === '__aep__' ? '' : 'none';
-    document.getElementById('up-project-files').style.display = e.target.value === '__aep__' ? 'none' : '';
-    updateProjectLastUpdatedHint(e.target.value);
+    const v = e.target.value;
+    document.getElementById('up-project-name-new').style.display = v === '__new__' ? '' : 'none';
+    document.getElementById('up-aep-files').style.display = v === '__aep__' ? '' : 'none';
+    document.getElementById('up-project-files').style.display = v === '__aep__' ? 'none' : '';
+    updateProjectLastUpdatedHint(v);
   });
   document.getElementById('up-parse').onclick = handleParseFiles;
 }
@@ -2256,6 +2317,367 @@ function openClassifyModal() {
   };
 }
 
+/* ===================== director report ("Звіт для РК") =====================
+   Separate full-screen view (not one of the three main tabs) — combines
+   per-topic АТТ + "Додаткове навчання" rows (director_report_details,
+   loaded from the "Деталізація" sheet) into one shareable summary: result
+   per type, overall result, per-topic breakdown, and two antitop
+   (worst-engagement) lists. See /api/director-report-* in app.py. */
+
+async function openDirectorReportView() {
+  document.getElementById('app').hidden = true;
+  const view = document.getElementById('director-report-view');
+  view.hidden = false;
+  renderDirectorReportShell();
+  await loadDirectorReportPeriods();
+}
+
+function closeDirectorReportView() {
+  document.getElementById('director-report-view').hidden = true;
+  document.getElementById('app').hidden = false;
+}
+
+function renderDirectorReportShell() {
+  const view = document.getElementById('director-report-view');
+  view.innerHTML = `
+    <div class="top-bar">
+      <div class="brand">
+        <img class="logo" src="/static/assets/logo_green.png" alt="COMFY">
+        <div>
+          <div class="brand-title">Звіт для РК</div>
+          <div class="brand-subtitle">АТТ і додаткове навчання директорів</div>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button class="btn btn-primary btn-sm" id="dr-upload">Завантажити файл</button>
+        <button class="btn btn-secondary btn-sm" id="dr-download-html">Завантажити HTML</button>
+        <button class="btn btn-secondary btn-sm" id="dr-back">← Назад у систему</button>
+      </div>
+    </div>
+    <div class="tabs">
+      <button class="tab-btn active" data-dr-tab="directors">Директори</button>
+    </div>
+    <div id="dr-content-area">
+      <!-- filled dynamically -->
+    </div>
+  `;
+  document.getElementById('dr-back').onclick = closeDirectorReportView;
+  document.getElementById('dr-download-html').onclick = downloadDirectorReportHtml;
+  document.getElementById('dr-upload').onclick = openDirectorReportUploadModal;
+}
+
+function openDirectorReportUploadModal() {
+  const root = document.getElementById('modal-root');
+  const lastUpdated = fmtUploadedAt(state.directorReportLastUpdated);
+  root.innerHTML = `
+    <div class="modal-backdrop" id="dr-upload-backdrop">
+      <div class="modal">
+        <button class="modal-close" id="dr-upload-close">✕</button>
+        <h2>Завантажити звіт для РК</h2>
+        <p class="modal-subtitle">Весь файл з аркушем «Деталізація» — квартал визначається автоматично з дати, оновлюється лише знайдений квартал.</p>
+        <div class="field-group">
+          <label>Файл</label>
+          <input type="file" id="dr-upload-file" accept=".xls,.xlsx">
+          <div class="field-hint">${lastUpdated ? `Востаннє оновлено: ${lastUpdated}` : 'Ще не завантажувалось'}</div>
+        </div>
+        <div id="dr-upload-preview"></div>
+        <div id="dr-upload-error" class="error-text"></div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" id="dr-upload-cancel">Скасувати</button>
+          <button class="btn btn-primary" id="dr-upload-parse">Перевірити файл</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.getElementById('dr-upload-close').onclick = closeModal;
+  document.getElementById('dr-upload-cancel').onclick = closeModal;
+  document.getElementById('dr-upload-backdrop').addEventListener('click', (e) => {
+    if (e.target.id === 'dr-upload-backdrop') closeModal();
+  });
+  document.getElementById('dr-upload-parse').onclick = handleDirectorReportParse;
+}
+
+async function handleDirectorReportParse() {
+  const errorEl = document.getElementById('dr-upload-error');
+  errorEl.textContent = '';
+  const file = document.getElementById('dr-upload-file').files[0];
+  if (!file) { errorEl.textContent = 'Оберіть файл.'; return; }
+
+  let rows;
+  try {
+    rows = await readDirectorReportWorkbookRows(file);
+  } catch (e) {
+    errorEl.textContent = `Помилка читання файлу: ${e.message}`;
+    return;
+  }
+  if (!rows.length) {
+    errorEl.textContent = 'Не знайдено жодного рядка на аркуші «Деталізація».';
+    return;
+  }
+
+  const byQuarter = {};
+  rows.forEach((r) => {
+    const key = `${r.year} Q${r.quarter}`;
+    byQuarter[key] = (byQuarter[key] || 0) + 1;
+  });
+  const quarterSummaries = Object.entries(byQuarter)
+    .map(([key, count]) => ({ key, count }))
+    .sort((a, b) => a.key.localeCompare(b.key));
+
+  document.getElementById('dr-upload-preview').innerHTML = `
+    <div class="upload-summary">«${escapeHtml(file.name)}» — усього ${rows.length} рядків, буде оновлено квартали:<br>${quarterSummaries.map((q) => `${escapeHtml(q.key)}: ${q.count} рядків`).join('<br>')}</div>
+  `;
+  const actions = document.querySelector('#dr-upload-backdrop .modal-actions');
+  actions.innerHTML = `
+    <button class="btn btn-secondary" id="dr-upload-cancel2">Скасувати</button>
+    <button class="btn btn-primary" id="dr-upload-save">Зберегти</button>
+  `;
+  document.getElementById('dr-upload-cancel2').onclick = closeModal;
+  document.getElementById('dr-upload-save').onclick = async () => {
+    const btn = document.getElementById('dr-upload-save');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Збереження…';
+    try {
+      const resp = await api('/api/upload-director-report', { method: 'POST', body: JSON.stringify({ rows }) });
+      closeModal();
+      showToast(`Звіт для РК збережено: ${resp.quarters.map((q) => q.label).join(', ')}.`);
+      const drData = await api('/api/director-report-last-updated');
+      state.directorReportLastUpdated = drData.lastUpdated || null;
+      await loadDirectorReportPeriods();
+    } catch (e) {
+      document.getElementById('dr-upload-error').textContent = e.message;
+      btn.disabled = false;
+      btn.textContent = 'Зберегти';
+    }
+  };
+}
+
+async function loadDirectorReportPeriods() {
+  const data = await api('/api/director-report-periods');
+  state.directorReport.periods = data.periods || [];
+  if (!state.directorReport.periods.length) {
+    document.getElementById('dr-content-area').innerHTML = `
+      <div class="empty-state">
+        <h2>Ще немає даних</h2>
+        <p>Завантажте аркуш «Деталізація» через звичайну модалку «Завантажити дані» на головному сайті (пункт «Звіт для РК» у списку проєктів).</p>
+      </div>`;
+    return;
+  }
+  const latest = state.directorReport.periods[state.directorReport.periods.length - 1];
+  if (!state.directorReport.year || !state.directorReport.periods.some(
+    (p) => p.year === state.directorReport.year && p.quarter === state.directorReport.quarter
+  )) {
+    state.directorReport.year = latest.year;
+    state.directorReport.quarter = latest.quarter;
+  }
+  renderDirectorReportContent();
+  await refreshDirectorReportFilters();
+  await refreshDirectorReportData();
+}
+
+function renderDirectorReportContent() {
+  const { periods, year, quarter, region, store } = state.directorReport;
+  const el = document.getElementById('dr-content-area');
+  const sortedPeriods = [...periods].reverse();
+  const mostRecent = periods[periods.length - 1];
+  el.innerHTML = `
+    <div class="filters" id="dr-filters">
+      <div class="filter-field">
+        <label>Період</label>
+        <select id="dr-period">
+          ${sortedPeriods.map((p) => `<option value="${p.year}-${p.quarter}" ${p.year === year && p.quarter === quarter ? 'selected' : ''}>${escapeHtml(p.label)}${p.year === mostRecent.year && p.quarter === mostRecent.quarter ? ' (поточний)' : ''}</option>`).join('')}
+        </select>
+      </div>
+      <div class="filter-field">
+        <label>Регіон</label>
+        <select id="dr-region"><option value="">Усі регіони</option></select>
+      </div>
+      <div class="filter-field">
+        <label>Магазин</label>
+        <select id="dr-store"><option value="">Усі магазини</option></select>
+      </div>
+    </div>
+    <div class="kpi-grid" id="dr-kpi-grid"></div>
+    <div class="card">
+      <h3>По регіонах</h3>
+      <p class="field-hint">Завжди всі регіони, незалежно від фільтра вище — для огляду по мережі одразу.</p>
+      <div class="table-scroll"><table class="data-table" id="dr-regions-table"></table></div>
+    </div>
+    <div class="card">
+      <h3>Результат по темам</h3>
+      <div class="table-scroll"><table class="data-table" id="dr-topics-table"></table></div>
+    </div>
+    <div class="card">
+      <h3>Антитоп — АТТ <span class="muted">(найгірша залученість)</span></h3>
+      <div class="table-scroll"><table class="data-table" id="dr-worst-att-table"></table></div>
+      <div id="dr-worst-att-pagination"></div>
+    </div>
+    <div class="card">
+      <h3>Антитоп — Додаткове навчання <span class="muted">(найгірша залученість)</span></h3>
+      <div class="table-scroll"><table class="data-table" id="dr-worst-additional-table"></table></div>
+      <div id="dr-worst-additional-pagination"></div>
+    </div>
+  `;
+  document.getElementById('dr-period').addEventListener('change', async (e) => {
+    const [y, q] = e.target.value.split('-').map(Number);
+    state.directorReport.year = y;
+    state.directorReport.quarter = q;
+    state.directorReport.region = '';
+    state.directorReport.store = '';
+    await refreshDirectorReportFilters();
+    await refreshDirectorReportData();
+  });
+  document.getElementById('dr-region').addEventListener('change', async (e) => {
+    state.directorReport.region = e.target.value;
+    await refreshDirectorReportData();
+  });
+  document.getElementById('dr-store').addEventListener('change', async (e) => {
+    state.directorReport.store = e.target.value;
+    await refreshDirectorReportData();
+  });
+}
+
+async function refreshDirectorReportFilters() {
+  const { year, quarter, region, store } = state.directorReport;
+  const data = await api(`/api/director-report-filters?${qs({ year, quarter })}`);
+  const regionSelect = document.getElementById('dr-region');
+  const storeSelect = document.getElementById('dr-store');
+  regionSelect.innerHTML = `<option value="">Усі регіони</option>${(data.regions || []).map((r) => `<option value="${escapeHtml(r)}" ${r === region ? 'selected' : ''}>${escapeHtml(r)}</option>`).join('')}`;
+  storeSelect.innerHTML = `<option value="">Усі магазини</option>${(data.stores || []).map((s) => `<option value="${escapeHtml(s)}" ${s === store ? 'selected' : ''}>${escapeHtml(s)}</option>`).join('')}`;
+}
+
+async function refreshDirectorReportData() {
+  const { year, quarter, region, store } = state.directorReport;
+  const params = { year, quarter, region, store };
+  const [summary, byRegion, topics, worstAtt, worstAdditional] = await Promise.all([
+    api(`/api/director-report-summary?${qs(params)}`),
+    api(`/api/director-report-by-region?${qs({ year, quarter })}`),
+    api(`/api/director-report-topics?${qs(params)}`),
+    api(`/api/director-report-worst?${qs({ ...params, type: 'АТТ' })}`),
+    api(`/api/director-report-worst?${qs({ ...params, type: 'Додаткове навчання' })}`),
+  ]);
+  renderDirectorReportKpis(summary);
+  renderDirectorReportByRegion(byRegion.regions || []);
+  renderDirectorReportTopics(topics.topics || []);
+  state._drWorstAtt = worstAtt.people || [];
+  resetPageState('dr-worst-att');
+  renderDirectorReportWorstTable('att');
+  state._drWorstAdditional = worstAdditional.people || [];
+  resetPageState('dr-worst-additional');
+  renderDirectorReportWorstTable('additional');
+}
+
+function renderDirectorReportByRegion(regions) {
+  const table = document.getElementById('dr-regions-table');
+  table.innerHTML = `
+    <thead><tr><th>Регіон</th><th>АТТ</th><th>Додаткове навчання</th><th>Загальний результат</th><th>% залученості</th></tr></thead>
+    <tbody>${regions.map((r) => `
+      <tr>
+        <td>${escapeHtml(r.region)}</td>
+        <td>${progressCellHtml(r.att)}</td>
+        <td>${progressCellHtml(r.additional)}</td>
+        <td>${progressCellHtml(r.overall)}</td>
+        <td>${progressCellHtml(r.completionRate)}</td>
+      </tr>`).join('') || `<tr><td colspan="5" class="muted">Немає даних</td></tr>`}</tbody>
+  `;
+}
+
+function renderDirectorReportKpis(summary) {
+  const tiles = [
+    { label: 'Результат АТТ', value: fmtPct(summary.att), accent: 'green' },
+    { label: 'Результат додаткового навчання', value: fmtPct(summary.additional), accent: 'green' },
+    { label: 'Загальний результат', value: fmtPct(summary.overall), accent: '' },
+    { label: '% залученості', value: fmtPct(summary.completionRate), accent: '' },
+  ];
+  document.getElementById('dr-kpi-grid').innerHTML = tiles.map((tl) => `
+    <div class="kpi-tile ${tl.accent ? `accent-${tl.accent}` : ''}">
+      <div class="kpi-value">${tl.value}</div>
+      <div class="kpi-label">${escapeHtml(tl.label)}</div>
+    </div>`).join('');
+}
+
+function renderDirectorReportTopics(topics) {
+  const table = document.getElementById('dr-topics-table');
+  table.innerHTML = `
+    <thead><tr><th>Тема</th><th>Тип</th><th>Середній бал</th></tr></thead>
+    <tbody>${topics.map((t) => `
+      <tr>
+        <td>${escapeHtml(t.topic)}</td>
+        <td>${escapeHtml(t.trainingType)}</td>
+        <td>${progressCellHtml(t.avg)}</td>
+      </tr>`).join('') || `<tr><td colspan="3" class="muted">Немає даних</td></tr>`}</tbody>
+  `;
+}
+
+function renderDirectorReportWorstTable(kind) {
+  const rows = kind === 'att' ? (state._drWorstAtt || []) : (state._drWorstAdditional || []);
+  const key = `dr-worst-${kind}`;
+  const table = document.getElementById(`dr-worst-${kind}-table`);
+  const pageRows = pageSlice(key, rows);
+  table.innerHTML = `
+    <thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Відвідано</th><th>% залученості</th></tr></thead>
+    <tbody>${pageRows.map((p) => `
+      <tr>
+        <td>${escapeHtml(p.name)}</td>
+        <td>${escapeHtml(p.region)}</td>
+        <td>${escapeHtml(p.store)}</td>
+        <td>${fmtNum(p.passed)} з ${fmtNum(p.total)}</td>
+        <td>${progressCellHtml(p.rate)}</td>
+      </tr>`).join('') || `<tr><td colspan="5" class="muted">Немає даних</td></tr>`}</tbody>
+  `;
+  const pager = document.getElementById(`dr-worst-${kind}-pagination`);
+  pager.innerHTML = paginationBarHtml(key, rows.length);
+  wirePagination(pager, key, () => renderDirectorReportWorstTable(kind));
+}
+
+// Fully client-side snapshot: clone the currently-filtered report, inline
+// the stylesheet, and trigger a download — so it can be opened/forwarded
+// without access to the site at all (the original ask behind this whole
+// feature). No server round trip, no extra route.
+async function downloadDirectorReportHtml() {
+  const content = document.getElementById('dr-content-area');
+  if (!content) return;
+  let css = '';
+  try {
+    const res = await fetch('/static/css/style.css');
+    css = await res.text();
+  } catch (e) { /* ship without styles rather than fail the whole export */ }
+  const { year, quarter, region, store } = state.directorReport;
+  const periodLabel = `Q${quarter} ${year}`;
+  const scopeLabel = [region, store].filter(Boolean).join(' / ') || 'усі магазини';
+  const title = `Звіт для РК — ${periodLabel} — ${scopeLabel}`;
+  const clone = content.cloneNode(true);
+  // Interactive bits (sort headers, pagination buttons) don't do anything in
+  // a standalone file — drop them so the export doesn't look half-broken.
+  clone.querySelectorAll('[id$="-pagination"]').forEach((n) => n.remove());
+  clone.querySelectorAll('select').forEach((s) => {
+    const span = document.createElement('div');
+    span.className = 'field-hint';
+    span.textContent = s.selectedOptions[0]?.textContent || '';
+    s.replaceWith(span);
+  });
+  const html = `<!doctype html>
+<html lang="uk"><head><meta charset="utf-8">
+<title>${escapeHtml(title)}</title>
+<style>${css}
+body { background: var(--color-bg); padding: 24px; }
+</style>
+</head><body>
+<h1 style="font-family:var(--font-heading); margin-bottom:4px;">${escapeHtml(title)}</h1>
+<p class="muted" style="margin-bottom:20px;">Знято ${new Date().toLocaleDateString('uk-UA')}</p>
+${clone.outerHTML}
+</body></html>`;
+  const blob = new Blob([html], { type: 'text/html' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `Звіт для РК - ${periodLabel} - ${scopeLabel}.html`.replace(/[\\/:*?"<>|]/g, '_');
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 /* ===================== init ===================== */
 
 function bindTopActions() {
@@ -2264,6 +2686,7 @@ function bindTopActions() {
   document.getElementById('btn-logout').addEventListener('click', doLogout);
   document.getElementById('btn-upload').addEventListener('click', openUploadModal);
   document.getElementById('btn-classify').addEventListener('click', openClassifyModal);
+  document.getElementById('btn-director-report').addEventListener('click', openDirectorReportView);
 }
 
 bindTabs();

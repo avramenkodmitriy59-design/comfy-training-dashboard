@@ -12,7 +12,7 @@ from aggregate import (
     aggregate_project, clean_project_row, distribution_project,
     clean_aep_row, aep_goal_for_quarter, aggregate_aep, distribution_aep,
     normalize_person_name, normalize_roster_tier, build_roster_matcher, find_near_duplicate_names,
-    suggest_name_matches, find_roster_duplicate_rows,
+    suggest_name_matches, find_roster_duplicate_rows, clean_director_report_row,
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -920,6 +920,222 @@ def undo_aep_roster_dup_dismiss(dismissal_id):
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
+
+
+# ---------- "Звіт для РК" — director АТТ + Додаткове навчання ----------
+# Same growing-file model as AEP: one row per topic per director per
+# quarter, quarter resolved client-side from the row's own date, re-upload
+# replaces only the quarters present in that upload.
+
+@app.post("/api/upload-director-report")
+def upload_director_report():
+    data = request.get_json(silent=True) or {}
+    raw_rows = data.get("rows") or []
+    if not raw_rows:
+        return jsonify({"error": "Не знайдено жодного рядка"}), 400
+
+    groups = {}
+    for r in raw_rows:
+        year, quarter = r.get("year"), r.get("quarter")
+        if not year or not quarter:
+            continue
+        groups.setdefault((int(year), int(quarter)), []).append(r)
+
+    if not groups:
+        return jsonify({"error": "Не вдалося визначити рік/квартал жодного рядка"}), 400
+
+    conn = db.get_db()
+    summary = []
+    try:
+        conn.execute("BEGIN")
+        for (year, quarter) in groups:
+            conn.execute(
+                "DELETE FROM director_report_details WHERE period_year=? AND period_quarter=?",
+                (year, quarter),
+            )
+        uploaded_at = datetime.datetime.utcnow().isoformat() + "Z"
+        for (year, quarter), group_rows in sorted(groups.items()):
+            rows = [clean_director_report_row(r) for r in group_rows]
+            rows = [r for r in rows if r["topic"] and r["trainingType"]]
+            for r in rows:
+                conn.execute(
+                    "INSERT INTO director_report_details (period_year, period_quarter, topic, training_type, "
+                    "region, store, position, name, score, uploaded_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (year, quarter, r["topic"], r["trainingType"], r["region"], r["store"],
+                     r["position"], r["name"], r["score"], uploaded_at),
+                )
+            summary.append({"year": year, "quarter": quarter, "label": f"Q{quarter} {year}", "rows": len(rows)})
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return jsonify({"ok": True, "quarters": summary})
+
+
+@app.get("/api/director-report-last-updated")
+def director_report_last_updated():
+    conn = db.get_db()
+    row = conn.execute("SELECT MAX(uploaded_at) AS last FROM director_report_details").fetchone()
+    conn.close()
+    return jsonify({"lastUpdated": row["last"]})
+
+
+@app.get("/api/director-report-periods")
+def director_report_periods():
+    conn = db.get_db()
+    rows = conn.execute(
+        "SELECT DISTINCT period_year, period_quarter FROM director_report_details "
+        "ORDER BY period_year, period_quarter"
+    ).fetchall()
+    conn.close()
+    periods = [
+        {"year": r["period_year"], "quarter": r["period_quarter"], "label": f"Q{r['period_quarter']} {r['period_year']}"}
+        for r in rows
+    ]
+    return jsonify({"periods": periods})
+
+
+@app.get("/api/director-report-filters")
+def director_report_filters():
+    year, quarter = request.args.get("year"), request.args.get("quarter")
+    if not year or not quarter:
+        return jsonify({"error": "year і quarter обов'язкові"}), 400
+    conn = db.get_db()
+    regions = conn.execute(
+        "SELECT DISTINCT region FROM director_report_details "
+        "WHERE period_year=? AND period_quarter=? AND region != '' ORDER BY region",
+        (year, quarter),
+    ).fetchall()
+    stores = conn.execute(
+        "SELECT DISTINCT store FROM director_report_details "
+        "WHERE period_year=? AND period_quarter=? AND store != '' ORDER BY store",
+        (year, quarter),
+    ).fetchall()
+    conn.close()
+    return jsonify({"regions": [r["region"] for r in regions], "stores": [r["store"] for r in stores]})
+
+
+def _director_report_where(args):
+    clauses = ["period_year=?", "period_quarter=?"]
+    params = [args.get("year"), args.get("quarter")]
+    if args.get("region"):
+        clauses.append("region=?")
+        params.append(args["region"])
+    if args.get("store"):
+        clauses.append("store=?")
+        params.append(args["store"])
+    return " AND ".join(clauses), params
+
+
+@app.get("/api/director-report-summary")
+def director_report_summary():
+    year, quarter = request.args.get("year"), request.args.get("quarter")
+    if not year or not quarter:
+        return jsonify({"error": "year і quarter обов'язкові"}), 400
+    where, params = _director_report_where(request.args)
+    conn = db.get_db()
+
+    def avg_for(training_type=None):
+        w, p = where, list(params)
+        if training_type:
+            w += " AND training_type=?"
+            p.append(training_type)
+        return conn.execute(
+            f"SELECT AVG(score) AS avg, COUNT(*) AS c, "
+            f"SUM(CASE WHEN score > 0 THEN 1 ELSE 0 END) AS passed FROM director_report_details WHERE {w}",
+            p,
+        ).fetchone()
+
+    att = avg_for("АТТ")
+    additional = avg_for("Додаткове навчання")
+    overall = avg_for(None)
+    conn.close()
+    completion_rate = round((overall["passed"] / overall["c"]) * 100, 1) if overall["c"] else None
+    return jsonify({
+        "att": round(att["avg"], 1) if att["avg"] is not None else None,
+        "additional": round(additional["avg"], 1) if additional["avg"] is not None else None,
+        "overall": round(overall["avg"], 1) if overall["avg"] is not None else None,
+        "completionRate": completion_rate,
+        "count": overall["c"],
+    })
+
+
+@app.get("/api/director-report-by-region")
+def director_report_by_region():
+    """Always the full region breakdown (ignores the region/store filter —
+    that's the point: an at-a-glance table across every region, like the
+    source workbook's "ЗАГАЛЬНИЙ АТТ" sheet)."""
+    year, quarter = request.args.get("year"), request.args.get("quarter")
+    if not year or not quarter:
+        return jsonify({"error": "year і quarter обов'язкові"}), 400
+    conn = db.get_db()
+    rows = conn.execute(
+        "SELECT region, "
+        "AVG(CASE WHEN training_type='АТТ' THEN score END) AS att, "
+        "AVG(CASE WHEN training_type='Додаткове навчання' THEN score END) AS additional, "
+        "AVG(score) AS overall, "
+        "SUM(CASE WHEN score > 0 THEN 1 ELSE 0 END) AS passed, COUNT(*) AS total "
+        "FROM director_report_details WHERE period_year=? AND period_quarter=? AND region != '' "
+        "GROUP BY region ORDER BY region",
+        (year, quarter),
+    ).fetchall()
+    conn.close()
+    return jsonify({"regions": [{
+        "region": r["region"],
+        "att": round(r["att"], 1) if r["att"] is not None else None,
+        "additional": round(r["additional"], 1) if r["additional"] is not None else None,
+        "overall": round(r["overall"], 1) if r["overall"] is not None else None,
+        "completionRate": round((r["passed"] / r["total"]) * 100, 1) if r["total"] else None,
+    } for r in rows]})
+
+
+@app.get("/api/director-report-topics")
+def director_report_topics():
+    year, quarter = request.args.get("year"), request.args.get("quarter")
+    if not year or not quarter:
+        return jsonify({"error": "year і quarter обов'язкові"}), 400
+    where, params = _director_report_where(request.args)
+    conn = db.get_db()
+    rows = conn.execute(
+        f"SELECT topic, training_type, AVG(score) AS avg, COUNT(*) AS c FROM director_report_details "
+        f"WHERE {where} GROUP BY topic, training_type ORDER BY training_type, topic",
+        params,
+    ).fetchall()
+    conn.close()
+    return jsonify({"topics": [
+        {"topic": r["topic"], "trainingType": r["training_type"], "avg": round(r["avg"], 1), "count": r["c"]}
+        for r in rows
+    ]})
+
+
+@app.get("/api/director-report-worst")
+def director_report_worst():
+    year, quarter = request.args.get("year"), request.args.get("quarter")
+    training_type = request.args.get("type")
+    if not year or not quarter or not training_type:
+        return jsonify({"error": "year, quarter і type обов'язкові"}), 400
+    where, params = _director_report_where(request.args)
+    where += " AND training_type=?"
+    params.append(training_type)
+    conn = db.get_db()
+    rows = conn.execute(
+        f"SELECT name, region, store, "
+        f"SUM(CASE WHEN score > 0 THEN 1 ELSE 0 END) AS passed, COUNT(*) AS total, AVG(score) AS avgScore "
+        f"FROM director_report_details WHERE {where} AND name != '' GROUP BY name, region, store",
+        params,
+    ).fetchall()
+    conn.close()
+    people = [{
+        "name": r["name"], "region": r["region"], "store": r["store"],
+        "passed": r["passed"], "total": r["total"],
+        "rate": round((r["passed"] / r["total"]) * 100, 1) if r["total"] else 0.0,
+        "avgScore": round(r["avgScore"], 1) if r["avgScore"] is not None else None,
+    } for r in rows]
+    people.sort(key=lambda p: (p["rate"], -p["total"]))
+    return jsonify({"people": people[:100]})
 
 
 # ---------- periods / trend ----------

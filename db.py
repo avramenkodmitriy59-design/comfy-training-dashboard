@@ -103,6 +103,26 @@ CREATE TABLE IF NOT EXISTS aep_roster_dup_dismissals (
     created_at TEXT NOT NULL,
     UNIQUE(name_norm_a, name_norm_b)
 );
+
+-- "Звіт для РК" — per-topic training rows for directors (АТТ +
+-- "Додаткове навчання" modules), one row per topic per person per
+-- quarter. Doesn't fit the periods/details shared schema (one row per
+-- employee per period) any more than AEP's per-session data did — same
+-- "growing file, quarter from row date" shape as aep_attendance.
+CREATE TABLE IF NOT EXISTS director_report_details (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    period_year INTEGER NOT NULL,
+    period_quarter INTEGER NOT NULL,
+    topic TEXT NOT NULL,
+    training_type TEXT NOT NULL,
+    region TEXT,
+    store TEXT,
+    position TEXT,
+    name TEXT,
+    score REAL,
+    uploaded_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_director_report_quarter ON director_report_details(period_year, period_quarter);
 """
 
 DEFAULT_POSITIONS = [
