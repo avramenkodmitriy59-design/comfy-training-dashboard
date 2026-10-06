@@ -2513,14 +2513,24 @@ function renderDirectorReportContent() {
       <div class="table-scroll"><table class="data-table" id="dr-topics-table"></table></div>
     </div>
     <div class="card">
-      <h3>Антитоп — АТТ <span class="muted">(найгірша залученість)</span></h3>
+      <h3>Антитоп — АТТ <span class="muted">(не завершили все)</span></h3>
       <div class="table-scroll"><table class="data-table" id="dr-worst-att-table"></table></div>
       <div id="dr-worst-att-pagination"></div>
     </div>
     <div class="card">
-      <h3>Антитоп — Додаткове навчання <span class="muted">(найгірша залученість)</span></h3>
+      <h3>ТОП — АТТ <span class="muted">(100% залученість)</span></h3>
+      <div class="table-scroll"><table class="data-table" id="dr-top-att-table"></table></div>
+      <div id="dr-top-att-pagination"></div>
+    </div>
+    <div class="card">
+      <h3>Антитоп — Додаткове навчання <span class="muted">(не завершили все)</span></h3>
       <div class="table-scroll"><table class="data-table" id="dr-worst-additional-table"></table></div>
       <div id="dr-worst-additional-pagination"></div>
+    </div>
+    <div class="card">
+      <h3>ТОП — Додаткове навчання <span class="muted">(100% залученість)</span></h3>
+      <div class="table-scroll"><table class="data-table" id="dr-top-additional-table"></table></div>
+      <div id="dr-top-additional-pagination"></div>
     </div>
   `;
   document.getElementById('dr-period').addEventListener('change', async (e) => {
@@ -2554,11 +2564,13 @@ async function refreshDirectorReportFilters() {
 async function refreshDirectorReportData() {
   const { year, quarter, region, store } = state.directorReport;
   const params = { year, quarter, region, store };
-  const [summary, topics, worstAtt, worstAdditional] = await Promise.all([
+  const [summary, topics, worstAtt, topAtt, worstAdditional, topAdditional] = await Promise.all([
     api(`/api/director-report-summary?${qs(params)}`),
     api(`/api/director-report-topics?${qs(params)}`),
     api(`/api/director-report-worst?${qs({ ...params, type: 'АТТ' })}`),
+    api(`/api/director-report-top?${qs({ ...params, type: 'АТТ' })}`),
     api(`/api/director-report-worst?${qs({ ...params, type: 'Додаткове навчання' })}`),
+    api(`/api/director-report-top?${qs({ ...params, type: 'Додаткове навчання' })}`),
   ]);
   renderDirectorReportKpis(summary);
   document.getElementById('dr-regions-card').hidden = !!region;
@@ -2573,12 +2585,16 @@ async function refreshDirectorReportData() {
     renderDirectorReportByRegion(byRegion.regions || []);
   }
   renderDirectorReportTopics(topics.topics || []);
-  state._drWorstAtt = worstAtt.people || [];
-  resetPageState('dr-worst-att');
-  renderDirectorReportWorstTable('att');
-  state._drWorstAdditional = worstAdditional.people || [];
-  resetPageState('dr-worst-additional');
-  renderDirectorReportWorstTable('additional');
+  state._drPeople = {
+    'dr-worst-att': worstAtt.people || [],
+    'dr-top-att': topAtt.people || [],
+    'dr-worst-additional': worstAdditional.people || [],
+    'dr-top-additional': topAdditional.people || [],
+  };
+  Object.keys(state._drPeople).forEach((key) => {
+    resetPageState(key);
+    renderDirectorReportPeopleTable(key);
+  });
 }
 
 function renderDirectorReportByRegion(regions) {
@@ -2642,10 +2658,9 @@ function renderDirectorReportTopics(topics) {
   `;
 }
 
-function renderDirectorReportWorstTable(kind) {
-  const rows = kind === 'att' ? (state._drWorstAtt || []) : (state._drWorstAdditional || []);
-  const key = `dr-worst-${kind}`;
-  const table = document.getElementById(`dr-worst-${kind}-table`);
+function renderDirectorReportPeopleTable(key) {
+  const rows = (state._drPeople || {})[key] || [];
+  const table = document.getElementById(`${key}-table`);
   const pageRows = pageSlice(key, rows);
   table.innerHTML = `
     <thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Відвідано</th><th>% залученості</th></tr></thead>
@@ -2658,9 +2673,9 @@ function renderDirectorReportWorstTable(kind) {
         <td>${progressCellHtml(p.rate)}</td>
       </tr>`).join('') || `<tr><td colspan="5" class="muted">Немає даних</td></tr>`}</tbody>
   `;
-  const pager = document.getElementById(`dr-worst-${kind}-pagination`);
+  const pager = document.getElementById(`${key}-pagination`);
   pager.innerHTML = paginationBarHtml(key, rows.length);
-  wirePagination(pager, key, () => renderDirectorReportWorstTable(kind));
+  wirePagination(pager, key, () => renderDirectorReportPeopleTable(key));
 }
 
 // Fully client-side snapshot: clone the currently-filtered report, inline
@@ -2739,12 +2754,20 @@ body { background: var(--color-bg); padding: 24px; }
   <div class="table-scroll"><table class="data-table" id="x-topics"></table></div>
 </div>
 <div class="card">
-  <h3>Антитоп — АТТ <span class="muted">(найгірша залученість)</span></h3>
+  <h3>Антитоп — АТТ <span class="muted">(не завершили все)</span></h3>
   <div class="table-scroll"><table class="data-table" id="x-worst-att"></table></div>
 </div>
 <div class="card">
-  <h3>Антитоп — Додаткове навчання <span class="muted">(найгірша залученість)</span></h3>
+  <h3>ТОП — АТТ <span class="muted">(100% залученість)</span></h3>
+  <div class="table-scroll"><table class="data-table" id="x-top-att"></table></div>
+</div>
+<div class="card">
+  <h3>Антитоп — Додаткове навчання <span class="muted">(не завершили все)</span></h3>
   <div class="table-scroll"><table class="data-table" id="x-worst-additional"></table></div>
+</div>
+<div class="card">
+  <h3>ТОП — Додаткове навчання <span class="muted">(100% залученість)</span></h3>
+  <div class="table-scroll"><table class="data-table" id="x-top-additional"></table></div>
 </div>
 <script>
 'use strict';
@@ -2790,17 +2813,29 @@ function topicsOf(rows) {
     .map((g) => ({ topic: g.topic, trainingType: g.trainingType, avg: avg(g.scores) }))
     .sort((a, b) => a.trainingType.localeCompare(b.trainingType) || a.topic.localeCompare(b.topic, 'uk'));
 }
-function worstOf(rows, type) {
+function peopleOf(rows, type) {
   const groups = {};
   rows.filter((r) => r.trainingType === type && r.name).forEach((r) => {
     const key = r.name + '|' + r.region + '|' + r.store;
-    const g = groups[key] = groups[key] || { name: r.name, region: r.region, store: r.store, passed: 0, total: 0 };
+    const g = groups[key] = groups[key] || { name: r.name, region: r.region, store: r.store, passed: 0, total: 0, scoreSum: 0 };
     g.total += 1;
+    g.scoreSum += r.score;
     if (r.score > 0) g.passed += 1;
   });
-  return Object.values(groups)
-    .map((g) => ({ ...g, rate: g.total ? (g.passed / g.total) * 100 : 0 }))
+  return Object.values(groups).map((g) => ({
+    name: g.name, region: g.region, store: g.store, passed: g.passed, total: g.total,
+    rate: g.total ? (g.passed / g.total) * 100 : 0,
+    avgScore: g.total ? g.scoreSum / g.total : null,
+  }));
+}
+function worstOf(rows, type) {
+  return peopleOf(rows, type).filter((p) => p.rate < 100)
     .sort((a, b) => a.rate - b.rate || b.total - a.total)
+    .slice(0, 100);
+}
+function topOf(rows, type) {
+  return peopleOf(rows, type).filter((p) => p.rate >= 100)
+    .sort((a, b) => (b.avgScore || 0) - (a.avgScore || 0) || b.total - a.total)
     .slice(0, 100);
 }
 function byRegionOf(rows) {
@@ -2862,7 +2897,9 @@ function render() {
   }
   renderTopics(topicsOf(rows));
   renderWorst('x-worst-att', worstOf(rows, 'АТТ'));
+  renderWorst('x-top-att', topOf(rows, 'АТТ'));
   renderWorst('x-worst-additional', worstOf(rows, 'Додаткове навчання'));
+  renderWorst('x-top-additional', topOf(rows, 'Додаткове навчання'));
 }
 
 function populateFilters() {

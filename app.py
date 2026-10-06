@@ -1159,15 +1159,12 @@ def director_report_topics():
     ]})
 
 
-@app.get("/api/director-report-worst")
-def director_report_worst():
-    year, quarter = request.args.get("year"), request.args.get("quarter")
-    training_type = request.args.get("type")
-    if not year or not quarter or not training_type:
-        return jsonify({"error": "year, quarter і type обов'язкові"}), 400
-    where, params = _director_report_where(request.args)
+def _director_report_people(args):
+    """Per-person participation within one training type (АТТ or Додаткове
+    навчання) — shared by the antitop and top endpoints below."""
+    where, params = _director_report_where(args)
     where += " AND training_type=?"
-    params.append(training_type)
+    params = params + [args.get("type")]
     conn = db.get_db()
     rows = conn.execute(
         f"SELECT name, region, store, "
@@ -1176,13 +1173,37 @@ def director_report_worst():
         params,
     ).fetchall()
     conn.close()
-    people = [{
+    return [{
         "name": r["name"], "region": r["region"], "store": r["store"],
         "passed": r["passed"], "total": r["total"],
         "rate": round((r["passed"] / r["total"]) * 100, 1) if r["total"] else 0.0,
         "avgScore": round(r["avgScore"], 1) if r["avgScore"] is not None else None,
     } for r in rows]
+
+
+@app.get("/api/director-report-worst")
+def director_report_worst():
+    """Antitop: only people who did NOT complete everything (rate < 100) —
+    a fully-engaged person has no business showing up in a "worst" list."""
+    year, quarter = request.args.get("year"), request.args.get("quarter")
+    training_type = request.args.get("type")
+    if not year or not quarter or not training_type:
+        return jsonify({"error": "year, quarter і type обов'язкові"}), 400
+    people = [p for p in _director_report_people(request.args) if p["rate"] < 100]
     people.sort(key=lambda p: (p["rate"], -p["total"]))
+    return jsonify({"people": people[:100]})
+
+
+@app.get("/api/director-report-top")
+def director_report_top():
+    """The complement of the antitop: everyone with full participation
+    (rate == 100), ranked by average score so the best performers lead."""
+    year, quarter = request.args.get("year"), request.args.get("quarter")
+    training_type = request.args.get("type")
+    if not year or not quarter or not training_type:
+        return jsonify({"error": "year, quarter і type обов'язкові"}), 400
+    people = [p for p in _director_report_people(request.args) if p["rate"] >= 100]
+    people.sort(key=lambda p: (-(p["avgScore"] or 0), -p["total"]))
     return jsonify({"people": people[:100]})
 
 
