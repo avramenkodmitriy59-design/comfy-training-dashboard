@@ -2730,21 +2730,58 @@ function renderDirectorReportPeopleTable(key) {
 // store filtering (and the full antitop lists, not just the visible
 // pagination page) keep working offline, with zero server round trips,
 // once the file has left the browser.
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function fetchAsDataUrl(path) {
+  try {
+    const blob = await fetch(path).then((r) => r.blob());
+    return await blobToDataUrl(blob);
+  } catch {
+    return '';
+  }
+}
+
+// Inlines the site's actual font files and logo as base64 data URLs so the
+// downloaded file renders with the real COMFY branding (Comfy Semi-Bold /
+// PT Root UI) instead of falling back to a system font — the relative
+// "../fonts/..." paths in the site's own stylesheet only resolve from
+// /static/css/, not from wherever this file ends up once downloaded.
 async function downloadDirectorReportHtml() {
   const { year, quarter } = state.directorReport;
   const btn = document.getElementById('dr-download-html');
   if (btn) { btn.disabled = true; btn.textContent = 'Готую файл…'; }
   try {
-    const [rawData, css] = await Promise.all([
+    const [rawData, css, logoDataUrl, comfySemiBold, ptRegular, ptMedium, ptBold] = await Promise.all([
       api(`/api/director-report-raw?${qs({ year, quarter })}`),
       fetch('/static/css/style.css').then((r) => r.text()).catch(() => ''),
+      fetchAsDataUrl('/static/assets/logo_green.png'),
+      fetchAsDataUrl('/static/fonts/ComfySemiBold/Comfy-Semi-Bold.woff2'),
+      fetchAsDataUrl('/static/fonts/PTRootUI/PT-Root-UI-Regular.woff2'),
+      fetchAsDataUrl('/static/fonts/PTRootUI/PT-Root-UI-Medium.woff2'),
+      fetchAsDataUrl('/static/fonts/PTRootUI/PT-Root-UI-Bold.woff2'),
     ]);
+    const fontCss = `
+@font-face { font-family: 'Comfy Semi-Bold'; src: url('${comfySemiBold}') format('woff2'); font-weight: 600; font-style: normal; }
+@font-face { font-family: 'PT Root UI'; src: url('${ptRegular}') format('woff2'); font-weight: 400; font-style: normal; }
+@font-face { font-family: 'PT Root UI'; src: url('${ptMedium}') format('woff2'); font-weight: 500; font-style: normal; }
+@font-face { font-family: 'PT Root UI'; src: url('${ptBold}') format('woff2'); font-weight: 700; font-style: normal; }
+`;
+    // Drop the site's own @font-face rules (relative paths that won't
+    // resolve) and replace them with the inlined data-URL versions above.
+    const inlinedCss = fontCss + css.replace(/@font-face\s*\{[^}]*\}/g, '');
     const periodLabel = `Q${quarter} ${year}`;
     const title = `Звіт для РК — ${periodLabel}`;
     // Guard against a topic/name containing a literal "</script>" breaking
     // out of the embedded data block.
     const rowsJson = JSON.stringify(rawData.rows || []).replace(/<\/script/gi, '<\\/script');
-    const html = buildDirectorReportExportHtml({ title, periodLabel, css, rowsJson });
+    const html = buildDirectorReportExportHtml({ title, periodLabel, css: inlinedCss, logoDataUrl, rowsJson });
     const blob = new Blob([html], { type: 'text/html' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -2761,7 +2798,7 @@ async function downloadDirectorReportHtml() {
   }
 }
 
-function buildDirectorReportExportHtml({ title, periodLabel, css, rowsJson }) {
+function buildDirectorReportExportHtml({ title, periodLabel, css, logoDataUrl, rowsJson }) {
   return `<!doctype html>
 <html lang="uk"><head><meta charset="utf-8">
 <title>${escapeHtml(title)}</title>
@@ -2770,8 +2807,15 @@ body { background: var(--color-bg); padding: 24px; }
 </style>
 </head><body>
 <div id="x-modal-root"></div>
-<h1 style="font-family:var(--font-heading); margin-bottom:4px;">${escapeHtml(title)}</h1>
-<p class="muted" style="margin-bottom:20px;">Знято ${new Date().toLocaleDateString('uk-UA')}</p>
+<div class="top-bar" style="margin-bottom:20px;">
+  <div class="brand">
+    ${logoDataUrl ? `<img class="logo" src="${logoDataUrl}" alt="COMFY">` : ''}
+    <div>
+      <div class="brand-title">Звіт для РК</div>
+      <div class="brand-subtitle">${escapeHtml(periodLabel)} · Знято ${new Date().toLocaleDateString('uk-UA')}</div>
+    </div>
+  </div>
+</div>
 <div class="filters" id="x-filters">
   <div class="filter-field">
     <label>Регіон</label>
