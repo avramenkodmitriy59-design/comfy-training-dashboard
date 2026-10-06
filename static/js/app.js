@@ -2618,8 +2618,8 @@ function renderDirectorReportEmployees() {
   const pageRows = pageSlice(key, rows);
   table.innerHTML = `
     <thead><tr><th>ПІБ</th><th>Магазин</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead>
-    <tbody>${pageRows.map((e) => `
-      <tr>
+    <tbody>${pageRows.map((e, i) => `
+      <tr class="row-clickable" data-idx="${i}">
         <td>${escapeHtml(e.name)}</td>
         <td>${escapeHtml(e.store)}</td>
         <td>${progressCellHtml(e.overall)}</td>
@@ -2627,9 +2627,49 @@ function renderDirectorReportEmployees() {
         <td>${progressCellHtml(e.additional)}</td>
       </tr>`).join('') || `<tr><td colspan="5" class="muted">Немає даних</td></tr>`}</tbody>
   `;
+  table.querySelectorAll('tbody tr[data-idx]').forEach((tr) => {
+    const e = pageRows[Number(tr.dataset.idx)];
+    tr.addEventListener('click', () => openDirectorEmployeeModal(e));
+  });
   const pager = document.getElementById('dr-employees-pagination');
   pager.innerHTML = paginationBarHtml(key, rows.length);
   wirePagination(pager, key, renderDirectorReportEmployees);
+}
+
+async function openDirectorEmployeeModal(employee) {
+  const { year, quarter } = state.directorReport;
+  const root = document.getElementById('modal-root');
+  root.innerHTML = `
+    <div class="modal-backdrop" id="dr-employee-backdrop">
+      <div class="modal" style="max-width:680px;">
+        <button class="modal-close" id="dr-employee-close">✕</button>
+        <h2>${escapeHtml(employee.name)}</h2>
+        <p class="modal-subtitle">${escapeHtml(employee.store)} · Загальний результат ${fmtPct(employee.overall)}</p>
+        <div class="table-scroll"><table class="data-table" id="dr-employee-topics-table">
+          <tbody><tr><td class="muted">Завантаження…</td></tr></tbody>
+        </table></div>
+      </div>
+    </div>
+  `;
+  document.getElementById('dr-employee-close').onclick = closeModal;
+  document.getElementById('dr-employee-backdrop').addEventListener('click', (e) => {
+    if (e.target.id === 'dr-employee-backdrop') closeModal();
+  });
+  const params = { year, quarter, store: employee.store, name: employee.name };
+  const data = await api(`/api/director-report-employee-topics?${qs(params)}`);
+  const topics = data.topics || [];
+  const table = document.getElementById('dr-employee-topics-table');
+  if (table) {
+    table.innerHTML = `
+      <thead><tr><th>Тема</th><th>Тип</th><th>Бал</th></tr></thead>
+      <tbody>${topics.map((t) => `
+        <tr>
+          <td>${escapeHtml(t.topic)}</td>
+          <td>${escapeHtml(t.trainingType)}</td>
+          <td>${progressCellHtml(t.score)}</td>
+        </tr>`).join('') || `<tr><td colspan="3" class="muted">Немає даних</td></tr>`}</tbody>
+    `;
+  }
 }
 
 function renderDirectorReportKpis(summary) {
@@ -2727,6 +2767,7 @@ function buildDirectorReportExportHtml({ title, periodLabel, css, rowsJson }) {
 body { background: var(--color-bg); padding: 24px; }
 </style>
 </head><body>
+<div id="x-modal-root"></div>
 <h1 style="font-family:var(--font-heading); margin-bottom:4px;">${escapeHtml(title)}</h1>
 <p class="muted" style="margin-bottom:20px;">Знято ${new Date().toLocaleDateString('uk-UA')}</p>
 <div class="filters" id="x-filters">
@@ -2866,10 +2907,39 @@ function renderRegions(regions) {
       || '<tr><td colspan="4" class="muted">Немає даних</td></tr>') + '</tbody>';
 }
 function renderEmployees(employees) {
-  document.getElementById('x-employees').innerHTML =
+  const el = document.getElementById('x-employees');
+  el.innerHTML =
     '<thead><tr><th>ПІБ</th><th>Магазин</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead><tbody>' +
-    (employees.map((e) => '<tr><td>' + esc(e.name) + '</td><td>' + esc(e.store) + '</td><td>' + progressCell(e.overall) + '</td><td>' + progressCell(e.att) + '</td><td>' + progressCell(e.additional) + '</td></tr>').join('')
+    (employees.map((e, i) => '<tr class="row-clickable" data-idx="' + i + '"><td>' + esc(e.name) + '</td><td>' + esc(e.store) + '</td><td>' + progressCell(e.overall) + '</td><td>' + progressCell(e.att) + '</td><td>' + progressCell(e.additional) + '</td></tr>').join('')
       || '<tr><td colspan="5" class="muted">Немає даних</td></tr>') + '</tbody>';
+  el.querySelectorAll('tbody tr[data-idx]').forEach((tr) => {
+    const e = employees[Number(tr.dataset.idx)];
+    tr.addEventListener('click', () => openEmployeeModal(e));
+  });
+}
+function closeEmployeeModal() {
+  document.getElementById('x-modal-root').innerHTML = '';
+}
+function openEmployeeModal(employee) {
+  const topics = ROWS.filter((r) => r.name === employee.name && r.store === employee.store)
+    .map((r) => ({ topic: r.topic, trainingType: r.trainingType, score: r.score }))
+    .sort((a, b) => a.trainingType.localeCompare(b.trainingType) || a.topic.localeCompare(b.topic, 'uk'));
+  document.getElementById('x-modal-root').innerHTML =
+    '<div class="modal-backdrop" id="x-employee-backdrop">' +
+      '<div class="modal" style="max-width:680px;">' +
+        '<button class="modal-close" id="x-employee-close">✕</button>' +
+        '<h2>' + esc(employee.name) + '</h2>' +
+        '<p class="modal-subtitle">' + esc(employee.store) + ' · Загальний результат ' + fmtPct(employee.overall) + '</p>' +
+        '<div class="table-scroll"><table class="data-table"><thead><tr><th>Тема</th><th>Тип</th><th>Бал</th></tr></thead><tbody>' +
+        (topics.map((t) => '<tr><td>' + esc(t.topic) + '</td><td>' + esc(t.trainingType) + '</td><td>' + progressCell(t.score) + '</td></tr>').join('')
+          || '<tr><td colspan="3" class="muted">Немає даних</td></tr>') +
+        '</tbody></table></div>' +
+      '</div>' +
+    '</div>';
+  document.getElementById('x-employee-close').onclick = closeEmployeeModal;
+  document.getElementById('x-employee-backdrop').addEventListener('click', (e) => {
+    if (e.target.id === 'x-employee-backdrop') closeEmployeeModal();
+  });
 }
 function renderTopics(topics) {
   document.getElementById('x-topics').innerHTML =

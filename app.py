@@ -1140,6 +1140,31 @@ def director_report_by_employee():
     } for r in rows]})
 
 
+@app.get("/api/director-report-employee-topics")
+def director_report_employee_topics():
+    """Per-topic breakdown for one director — the drill-down behind a row
+    in the by-employee table (store is included to disambiguate same-name
+    directors across different stores)."""
+    year, quarter = request.args.get("year"), request.args.get("quarter")
+    name = request.args.get("name")
+    if not year or not quarter or not name:
+        return jsonify({"error": "year, quarter і name обов'язкові"}), 400
+    where, params = _director_report_where(request.args)
+    where += " AND name=?"
+    params = params + [name]
+    conn = db.get_db()
+    rows = conn.execute(
+        f"SELECT topic, training_type, score FROM director_report_details "
+        f"WHERE {where} ORDER BY training_type, topic",
+        params,
+    ).fetchall()
+    conn.close()
+    return jsonify({"topics": [
+        {"topic": r["topic"], "trainingType": r["training_type"], "score": r["score"]}
+        for r in rows
+    ]})
+
+
 @app.get("/api/director-report-topics")
 def director_report_topics():
     year, quarter = request.args.get("year"), request.args.get("quarter")
