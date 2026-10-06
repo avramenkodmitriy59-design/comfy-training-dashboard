@@ -2544,6 +2544,8 @@ function renderDirectorReportContent() {
   });
   document.getElementById('dr-region').addEventListener('change', async (e) => {
     state.directorReport.region = e.target.value;
+    state.directorReport.store = '';
+    await refreshDirectorReportFilters();
     await refreshDirectorReportData();
   });
   document.getElementById('dr-store').addEventListener('change', async (e) => {
@@ -2554,7 +2556,7 @@ function renderDirectorReportContent() {
 
 async function refreshDirectorReportFilters() {
   const { year, quarter, region, store } = state.directorReport;
-  const data = await api(`/api/director-report-filters?${qs({ year, quarter })}`);
+  const data = await api(`/api/director-report-filters?${qs({ year, quarter, region })}`);
   const regionSelect = document.getElementById('dr-region');
   const storeSelect = document.getElementById('dr-store');
   regionSelect.innerHTML = `<option value="">Усі регіони</option>${(data.regions || []).map((r) => `<option value="${escapeHtml(r)}" ${r === region ? 'selected' : ''}>${escapeHtml(r)}</option>`).join('')}`;

@@ -1001,6 +1001,7 @@ def director_report_periods():
 @app.get("/api/director-report-filters")
 def director_report_filters():
     year, quarter = request.args.get("year"), request.args.get("quarter")
+    region = request.args.get("region")
     if not year or not quarter:
         return jsonify({"error": "year і quarter обов'язкові"}), 400
     conn = db.get_db()
@@ -1009,10 +1010,14 @@ def director_report_filters():
         "WHERE period_year=? AND period_quarter=? AND region != '' ORDER BY region",
         (year, quarter),
     ).fetchall()
+    store_where = "period_year=? AND period_quarter=? AND store != ''"
+    store_params = [year, quarter]
+    if region:
+        store_where += " AND region=?"
+        store_params.append(region)
     stores = conn.execute(
-        "SELECT DISTINCT store FROM director_report_details "
-        "WHERE period_year=? AND period_quarter=? AND store != '' ORDER BY store",
-        (year, quarter),
+        f"SELECT DISTINCT store FROM director_report_details WHERE {store_where} ORDER BY store",
+        store_params,
     ).fetchall()
     conn.close()
     return jsonify({"regions": [r["region"] for r in regions], "stores": [r["store"] for r in stores]})
