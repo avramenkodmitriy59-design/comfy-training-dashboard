@@ -2970,8 +2970,9 @@ function topOf(rows) {
     .slice(0, 100);
 }
 function byRegionOf(rows) {
-  const regions = [...new Set(rows.map((r) => r.region).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'uk'));
-  return regions.map((region) => ({ region, ...stats(rows.filter((r) => r.region === region)) }));
+  const regions = [...new Set(rows.map((r) => r.region).filter(Boolean))];
+  return regions.map((region) => ({ region, ...stats(rows.filter((r) => r.region === region)) }))
+    .sort((a, b) => (b.overall ?? -1) - (a.overall ?? -1));
 }
 
 function historicalLowOf(region, store) {

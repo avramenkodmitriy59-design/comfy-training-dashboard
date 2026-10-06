@@ -1219,7 +1219,7 @@ def director_report_by_region():
         "AVG(CASE WHEN training_type='Додаткове навчання' THEN score END) AS additional, "
         "AVG(score) AS overall "
         "FROM director_report_details WHERE period_year=? AND period_quarter=? AND region != '' "
-        "GROUP BY region ORDER BY region",
+        "GROUP BY region ORDER BY overall DESC",
         (year, quarter),
     ).fetchall()
     conn.close()
