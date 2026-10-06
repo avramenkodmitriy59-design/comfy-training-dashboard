@@ -2515,7 +2515,7 @@ function renderDirectorReportContent() {
     </div>
     <div class="card">
       <h3>Низькі результати — історично</h3>
-      <p class="field-hint">Середній результат за всі квартали (мінімум 2 квартали в базі), а не лише за обраний період. Натисни на рядок для динаміки по кварталах.</p>
+      <p class="field-hint">Середній результат нижче 70% за всі квартали (мінімум 2 квартали в базі) — ті, на кого варто звернути увагу першочергово. Натисни на рядок для динаміки по кварталах.</p>
       <div class="table-scroll"><table class="data-table" id="dr-historical-low-table"></table></div>
       <div id="dr-historical-low-pagination"></div>
     </div>
@@ -2701,7 +2701,7 @@ function renderDirectorReportHistoricalLow() {
         <td>${progressCellHtml(p.overall)}</td>
         <td>${progressCellHtml(p.att)}</td>
         <td>${progressCellHtml(p.additional)}</td>
-      </tr>`).join('') || `<tr><td colspan="7" class="muted">Немає даних — усі в базі лише один квартал</td></tr>`}</tbody>
+      </tr>`).join('') || `<tr><td colspan="7" class="muted">Немає — усі в нормі (≥70% за весь час)</td></tr>`}</tbody>
   `;
   table.querySelectorAll('tbody tr[data-idx]').forEach((tr) => {
     const p = pageRows[Number(tr.dataset.idx)];
@@ -2918,7 +2918,7 @@ body { background: var(--color-bg); padding: 24px; }
 </div>
 <div class="card">
   <h3>Низькі результати — історично</h3>
-  <p class="field-hint">Середній результат за всі квартали (мінімум 2 квартали в базі), а не лише за обраний період. Натисни на рядок для динаміки по кварталах.</p>
+  <p class="field-hint">Середній результат нижче 70% за всі квартали (мінімум 2 квартали в базі) — ті, на кого варто звернути увагу першочергово. Натисни на рядок для динаміки по кварталах.</p>
   <div class="table-scroll"><table class="data-table" id="x-historical-low"></table></div>
 </div>
 <div class="card">
@@ -3035,7 +3035,8 @@ function historicalLowOf(region, store) {
       additional: g.addCount ? g.addSum / g.addCount : null,
       overall: g.allCount ? g.allSum / g.allCount : null,
     }))
-    .sort((a, b) => (a.overall ?? 999) - (b.overall ?? 999) || b.quarterCount - a.quarterCount)
+    .filter((p) => p.overall !== null && p.overall < 70)
+    .sort((a, b) => a.overall - b.overall || b.quarterCount - a.quarterCount)
     .slice(0, 100);
 }
 function historicalTrendOf(name) {
@@ -3131,7 +3132,7 @@ function renderHistoricalLow(people) {
   el.innerHTML =
     '<thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Кварталів</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead><tbody>' +
     (people.map((p, i) => '<tr class="row-clickable" data-idx="' + i + '"><td>' + esc(p.name) + '</td><td>' + esc(p.region) + '</td><td>' + esc(p.store) + '</td><td>' + p.quarterCount + '</td><td>' + progressCell(p.overall) + '</td><td>' + progressCell(p.att) + '</td><td>' + progressCell(p.additional) + '</td></tr>').join('')
-      || '<tr><td colspan="7" class="muted">Немає даних — усі в базі лише один квартал</td></tr>') + '</tbody>';
+      || '<tr><td colspan="7" class="muted">Немає — усі в нормі (≥70% за весь час)</td></tr>') + '</tbody>';
   el.querySelectorAll('tbody tr[data-idx]').forEach((tr) => {
     const p = people[Number(tr.dataset.idx)];
     tr.addEventListener('click', () => openHistoricalTrendModal(p));

@@ -1137,11 +1137,15 @@ def _director_report_historical_people(region=None, store=None):
     return result
 
 
+DIRECTOR_REPORT_HISTORICAL_LOW_THRESHOLD = 70  # below this = needs priority attention
+
+
 @app.get("/api/director-report-historical-low")
 def director_report_historical_low():
     people = _director_report_historical_people(request.args.get("region"), request.args.get("store"))
-    people.sort(key=lambda p: (p["overall"] if p["overall"] is not None else 999, -p["quarterCount"]))
-    return jsonify({"people": people[:100]})
+    people = [p for p in people if p["overall"] is not None and p["overall"] < DIRECTOR_REPORT_HISTORICAL_LOW_THRESHOLD]
+    people.sort(key=lambda p: (p["overall"], -p["quarterCount"]))
+    return jsonify({"people": people[:100], "threshold": DIRECTOR_REPORT_HISTORICAL_LOW_THRESHOLD})
 
 
 @app.get("/api/director-report-historical-trend")
