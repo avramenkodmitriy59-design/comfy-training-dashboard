@@ -2859,6 +2859,13 @@ function buildDirectorReportExportHtml({ title, periodLabel, css, logoDataUrl, r
 body { background: var(--color-bg); padding: 24px; }
 </style>
 </head><body>
+<noscript>
+  <div class="card" style="border:2px solid var(--color-red); margin-bottom:16px;">
+    <h3 style="color:var(--color-red);">Дані не завантажились</h3>
+    <p>Цей файл показує результати за допомогою JavaScript, а переглядач, яким він зараз відкритий (вбудований перегляд у месенджері чи пошті), його не виконує.</p>
+    <p><strong>Що робити:</strong> збережіть файл і відкрийте його напряму в браузері — на iPhone через «Поділитися» → «Відкрити у Safari», на Android — «Відкрити за допомогою» → Chrome.</p>
+  </div>
+</noscript>
 <div id="x-modal-root"></div>
 <div class="top-bar" style="margin-bottom:20px;">
   <div class="brand">
