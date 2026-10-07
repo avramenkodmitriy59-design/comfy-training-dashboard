@@ -1294,15 +1294,16 @@ def director_report_topics():
     where, params = _director_report_where(request.args)
     conn = db.get_db()
     rows = conn.execute(
-        f"SELECT topic, training_type, AVG(score) AS avg, COUNT(*) AS c FROM director_report_details "
+        f"SELECT topic, training_type, AVG(score) AS avg, COUNT(*) AS c, "
+        f"SUM(CASE WHEN score > 0 THEN 1 ELSE 0 END) AS passed FROM director_report_details "
         f"WHERE {where} GROUP BY topic, training_type ORDER BY training_type, topic",
         params,
     ).fetchall()
     conn.close()
-    return jsonify({"topics": [
-        {"topic": r["topic"], "trainingType": r["training_type"], "avg": round(r["avg"], 1), "count": r["c"]}
-        for r in rows
-    ]})
+    return jsonify({"topics": [{
+        "topic": r["topic"], "trainingType": r["training_type"], "avg": round(r["avg"], 1), "count": r["c"],
+        "completionRate": round((r["passed"] / r["c"]) * 100, 1) if r["c"] else None,
+    } for r in rows]})
 
 
 @app.get("/api/director-report-top")

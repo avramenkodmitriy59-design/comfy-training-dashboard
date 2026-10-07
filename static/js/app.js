@@ -2738,13 +2738,14 @@ function renderDirectorReportKpis(summary) {
 function renderDirectorReportTopics(topics) {
   const table = document.getElementById('dr-topics-table');
   table.innerHTML = `
-    <thead><tr><th>Тема</th><th>Тип</th><th>Середній бал</th></tr></thead>
+    <thead><tr><th>Тема</th><th>Тип</th><th>Середній бал</th><th>Залученість</th></tr></thead>
     <tbody>${topics.map((t) => `
       <tr>
         <td>${escapeHtml(t.topic)}</td>
         <td>${escapeHtml(t.trainingType)}</td>
         <td>${progressCellHtml(t.avg)}</td>
-      </tr>`).join('') || `<tr><td colspan="3" class="muted">Немає даних</td></tr>`}</tbody>
+        <td>${progressCellHtml(t.completionRate)}</td>
+      </tr>`).join('') || `<tr><td colspan="4" class="muted">Немає даних</td></tr>`}</tbody>
   `;
 }
 
@@ -2944,7 +2945,10 @@ function topicsOf(rows) {
     (groups[key] = groups[key] || { topic: r.topic, trainingType: r.trainingType, scores: [] }).scores.push(r.score);
   });
   return Object.values(groups)
-    .map((g) => ({ topic: g.topic, trainingType: g.trainingType, avg: avg(g.scores) }))
+    .map((g) => ({
+      topic: g.topic, trainingType: g.trainingType, avg: avg(g.scores),
+      completionRate: g.scores.length ? (g.scores.filter((s) => s > 0).length / g.scores.length) * 100 : null,
+    }))
     .sort((a, b) => a.trainingType.localeCompare(b.trainingType) || a.topic.localeCompare(b.topic, 'uk'));
 }
 function topOf(rows) {
@@ -3080,9 +3084,9 @@ function openEmployeeModal(employee) {
 }
 function renderTopics(topics) {
   document.getElementById('x-topics').innerHTML =
-    '<thead><tr><th>Тема</th><th>Тип</th><th>Середній бал</th></tr></thead><tbody>' +
-    (topics.map((t) => '<tr><td>' + esc(t.topic) + '</td><td>' + esc(t.trainingType) + '</td><td>' + progressCell(t.avg) + '</td></tr>').join('')
-      || '<tr><td colspan="3" class="muted">Немає даних</td></tr>') + '</tbody>';
+    '<thead><tr><th>Тема</th><th>Тип</th><th>Середній бал</th><th>Залученість</th></tr></thead><tbody>' +
+    (topics.map((t) => '<tr><td>' + esc(t.topic) + '</td><td>' + esc(t.trainingType) + '</td><td>' + progressCell(t.avg) + '</td><td>' + progressCell(t.completionRate) + '</td></tr>').join('')
+      || '<tr><td colspan="4" class="muted">Немає даних</td></tr>') + '</tbody>';
 }
 function renderTop(people) {
   document.getElementById('x-top').innerHTML =
