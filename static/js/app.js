@@ -2147,6 +2147,7 @@ function renderUploadPreview() {
       return `<div class="upload-summary">Проєкт «${escapeHtml(p.projectName)}» — усього ${p.rows.length} рядків:<br>${lines}</div>`;
     }
     if (p.kind === 'aep') {
+      if (p.fromQuarterKey === undefined) p.fromQuarterKey = Number(p.quarterSummaries[0]?.key.match(/(\d+) Q(\d)/).slice(1).reverse().join('')) || 0;
       const lines = p.quarterSummaries.map((q) => `${escapeHtml(q.key)}: ${q.count} сесій`).join('<br>');
       // A 0-record result usually means the "Apple_Certified_-_Attendance" sheet
       // wasn't found (e.g. a renamed tab) — flag it instead of saving silently
@@ -2154,7 +2155,18 @@ function renderUploadPreview() {
       const attLine = p.attendance.length
         ? `<br>Відвідуваність: ${p.attendance.length} записів учасників.`
         : `<br><span style="color:var(--color-red)">Відвідуваність: 0 записів — лист «Apple_Certified_-_Attendance» не знайдено у файлі чи він порожній. Дані відвідуваності НЕ оновляться.</span>`;
-      return `<div class="upload-summary">AEP «${escapeHtml(p.fileName)}» — усього ${p.rows.length} сесій, буде оновлено квартали:<br>${lines}${attLine}</div>`;
+      const quarterOptions = p.quarterSummaries.map((q) => {
+        const m = q.key.match(/(\d+) Q(\d)/);
+        const key = Number(`${m[1]}${m[2]}`);
+        return `<option value="${key}" ${key === p.fromQuarterKey ? 'selected' : ''}>${escapeHtml(q.key)}</option>`;
+      }).join('');
+      return `<div class="upload-summary">AEP «${escapeHtml(p.fileName)}» — усього ${p.rows.length} сесій, буде оновлено квартали:<br>${lines}${attLine}
+        <div class="field-group" style="margin-top:10px;">
+          <label>Завантажити починаючи з кварталу</label>
+          <select id="aep-from-quarter">${quarterOptions}</select>
+          <div class="field-hint" id="aep-cutoff-summary"></div>
+        </div>
+      </div>`;
     }
     if (p.kind === 'aep-roster') {
       const champions = p.rosterRows.filter((r) => /чемпіон/i.test(r.status) && !/^не /i.test(r.status.trim())).length;
@@ -2190,6 +2202,22 @@ function renderUploadPreview() {
     ${filesHtml}
     ${classifyHtml}
   `;
+  const aepPending = pending.find((p) => p.kind === 'aep' && !p.error);
+  const aepSelect = document.getElementById('aep-from-quarter');
+  if (aepSelect) {
+    const updateCutoffSummary = () => {
+      const cutoff = Number(aepSelect.value);
+      aepPending.fromQuarterKey = cutoff;
+      const sessionsKept = aepPending.rows.filter((r) => r.year * 10 + r.quarter >= cutoff).length;
+      const attendanceKept = aepPending.attendance.filter((r) => r.year * 10 + r.quarter >= cutoff).length;
+      document.getElementById('aep-cutoff-summary').textContent =
+        cutoff === Number(`${aepPending.quarterSummaries[0].key.match(/(\d+) Q(\d)/)[1]}${aepPending.quarterSummaries[0].key.match(/(\d+) Q(\d)/)[2]}`)
+          ? `Буде завантажено все: ${sessionsKept} сесій, ${attendanceKept} записів відвідуваності.`
+          : `Буде завантажено ${sessionsKept} з ${aepPending.rows.length} сесій, ${attendanceKept} з ${aepPending.attendance.length} записів відвідуваності.`;
+    };
+    aepSelect.addEventListener('change', updateCutoffSummary);
+    updateCutoffSummary();
+  }
   const actions = document.querySelector('#upload-backdrop .modal-actions');
   actions.innerHTML = `
     <button class="btn btn-secondary" id="up-cancel2">Скасувати</button>
@@ -2221,7 +2249,10 @@ async function handleSaveUpload() {
     for (const p of pending) {
       if (p.error) continue;
       if (p.kind === 'aep') {
-        const resp = await api('/api/upload-aep', { method: 'POST', body: JSON.stringify({ rows: p.rows, attendance: p.attendance }) });
+        const cutoff = p.fromQuarterKey || 0;
+        const rows = p.rows.filter((r) => r.year * 10 + r.quarter >= cutoff);
+        const attendance = p.attendance.filter((r) => r.year * 10 + r.quarter >= cutoff);
+        const resp = await api('/api/upload-aep', { method: 'POST', body: JSON.stringify({ rows, attendance }) });
         savedCount += resp.quarters.length;
         aepQuartersMsg = ` AEP: ${resp.quarters.map((q) => q.label).join(', ')}.`;
         continue;
