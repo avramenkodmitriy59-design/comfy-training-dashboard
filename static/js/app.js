@@ -330,6 +330,24 @@ function aepQuarterOf(d) {
   return Math.floor(d.getMonth() / 3) + 1;
 }
 
+// "Поточний" badge on a period selector means "this is the real calendar
+// quarter right now" — not "the most recently uploaded period", which can
+// lag behind once a new quarter starts before that quarter's data exists.
+function isCurrentQuarter(year, quarter) {
+  const now = new Date();
+  return Number(year) === now.getFullYear() && Number(quarter) === Math.floor(now.getMonth() / 3) + 1;
+}
+
+// AEP periods carry year/quarter columns directly; "overall"/"attestation"
+// periods don't (only a free-text label), but that label is always typed via
+// the upload modal's quarter+year fields in a fixed "N квартал YYYY" shape —
+// parse it back out. Project periods have neither, so they never badge.
+function periodIsCurrentQuarter(p) {
+  if (p.year && p.quarter) return isCurrentQuarter(p.year, p.quarter);
+  const m = /^(\d+)\s*квартал\s*(\d+)/.exec(p.label || '');
+  return m ? isCurrentQuarter(m[2], m[1]) : false;
+}
+
 function stripTopicSlot(topic) {
   return String(topic).replace(/\s*\(#?\d+\)\s*$/, '').trim();
 }
@@ -1010,12 +1028,11 @@ function renderFiltersBar() {
   // Date, and ties from same-transaction inserts made re-sorting unstable).
   const sortedPeriods = [...state.periods].reverse();
   const selected = resolveSelectedPeriod();
-  const mostRecentId = state.periods[state.periods.length - 1]?.id;
 
   const periodFieldHtml = `
     <div class="filter-field">
       <label>Період</label>
-      <select id="f-period">${sortedPeriods.map((p) => `<option value="${p.id}" ${selected && p.id === selected.id ? 'selected' : ''}>${escapeHtml(p.label)}${p.id === mostRecentId ? ' (поточний)' : ''}</option>`).join('')}</select>
+      <select id="f-period">${sortedPeriods.map((p) => `<option value="${p.id}" ${selected && p.id === selected.id ? 'selected' : ''}>${escapeHtml(p.label)}${periodIsCurrentQuarter(p) ? ' (поточний)' : ''}</option>`).join('')}</select>
     </div>
   `;
 
@@ -2512,13 +2529,12 @@ function renderDirectorReportContent() {
   const { periods, year, quarter, region, store } = state.directorReport;
   const el = document.getElementById('dr-content-area');
   const sortedPeriods = [...periods].reverse();
-  const mostRecent = periods[periods.length - 1];
   el.innerHTML = `
     <div class="filters" id="dr-filters">
       <div class="filter-field">
         <label>Період</label>
         <select id="dr-period">
-          ${sortedPeriods.map((p) => `<option value="${p.year}-${p.quarter}" ${p.year === year && p.quarter === quarter ? 'selected' : ''}>${escapeHtml(p.label)}${p.year === mostRecent.year && p.quarter === mostRecent.quarter ? ' (поточний)' : ''}</option>`).join('')}
+          ${sortedPeriods.map((p) => `<option value="${p.year}-${p.quarter}" ${p.year === year && p.quarter === quarter ? 'selected' : ''}>${escapeHtml(p.label)}${isCurrentQuarter(p.year, p.quarter) ? ' (поточний)' : ''}</option>`).join('')}
         </select>
       </div>
       <div class="filter-field">
