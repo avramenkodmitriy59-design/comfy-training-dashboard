@@ -52,7 +52,9 @@ const state = {
 /* ===================== utils ===================== */
 
 async function api(path, opts) {
-  const res = await fetch(path, {
+  // Relative URL (no leading slash) so the app also works when served from a
+  // subpath behind a reverse proxy, e.g. https://host/retail-lnd/.
+  const res = await fetch(path.replace(/^\//, ''), {
     headers: { 'Content-Type': 'application/json' },
     ...opts,
   });
@@ -2792,7 +2794,7 @@ function blobToDataUrl(blob) {
 
 async function fetchAsDataUrl(path) {
   try {
-    const blob = await fetch(path).then((r) => r.blob());
+    const blob = await fetch(path.replace(/^\//, '')).then((r) => r.blob());
     return await blobToDataUrl(blob);
   } catch {
     return '';
@@ -2812,7 +2814,7 @@ async function downloadDirectorReportHtml() {
     const [rawData, allData, css, logoDataUrl, comfySemiBold, ptRegular, ptMedium, ptBold] = await Promise.all([
       api(`/api/director-report-raw?${qs({ year, quarter })}`),
       api(`/api/director-report-raw-all`),
-      fetch('/static/css/style.css').then((r) => r.text()).catch(() => ''),
+      fetch('static/css/style.css').then((r) => r.text()).catch(() => ''),
       fetchAsDataUrl('/static/assets/logo_green.png'),
       fetchAsDataUrl('/static/fonts/ComfySemiBold/Comfy-Semi-Bold.woff2'),
       fetchAsDataUrl('/static/fonts/PTRootUI/PT-Root-UI-Regular.woff2'),

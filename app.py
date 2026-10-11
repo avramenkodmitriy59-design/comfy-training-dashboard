@@ -5,6 +5,7 @@ import hmac
 import datetime
 
 from flask import Flask, request, session, jsonify, send_from_directory
+from werkzeug.utils import redirect
 
 import db
 from aggregate import (
@@ -43,10 +44,32 @@ SECRETS = load_or_create_secrets()
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.secret_key = SECRETS["flask_secret_key"]
 app.json.sort_keys = False  # preserve insertion order (e.g. distribution buckets lt40..gte90)
+# The app is also served from this subpath (https://host/retail-lnd/). Requests
+# with the prefix are stripped here, so it works both when a reverse proxy keeps
+# the prefix and when it strips it; the root URL keeps working too.
+# Override with the URL_PREFIX env var (empty value disables the prefix).
+URL_PREFIX = os.environ.get("URL_PREFIX", "/retail-lnd").rstrip("/")
 app.config.update(
+    # unique name so the cookie doesn't clash with other apps on the same host
+    SESSION_COOKIE_NAME="comfy_training_session",
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
 )
+
+if URL_PREFIX:
+    _inner_wsgi_app = app.wsgi_app
+
+    def _strip_url_prefix(environ, start_response):
+        path = environ.get("PATH_INFO", "")
+        if path == URL_PREFIX:
+            # "/retail-lnd" -> "/retail-lnd/", otherwise relative asset URLs break
+            return redirect(URL_PREFIX + "/", 301)(environ, start_response)
+        if path.startswith(URL_PREFIX + "/"):
+            environ["SCRIPT_NAME"] = environ.get("SCRIPT_NAME", "") + URL_PREFIX
+            environ["PATH_INFO"] = path[len(URL_PREFIX):]
+        return _inner_wsgi_app(environ, start_response)
+
+    app.wsgi_app = _strip_url_prefix
 
 db.init_db()
 
