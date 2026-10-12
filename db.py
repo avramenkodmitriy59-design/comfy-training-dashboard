@@ -123,6 +123,33 @@ CREATE TABLE IF NOT EXISTS director_report_details (
     uploaded_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_director_report_quarter ON director_report_details(period_year, period_quarter);
+
+-- "Звіт по заняттям" — per-person results for ONE specific training
+-- session (e.g. "Звіт по заняттю #1732: ..."), unlike periods/details
+-- (which are per-quarter across all trainings for a stream). Each
+-- lesson_reports row is one uploaded lesson, keyed by the lesson number
+-- parsed from the file so re-uploading the same lesson replaces it
+-- (same upsert shape as director_report/AEP) instead of piling up.
+CREATE TABLE IF NOT EXISTS lesson_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lesson_key TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    uploaded_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS lesson_report_details (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lesson_report_id INTEGER NOT NULL REFERENCES lesson_reports(id) ON DELETE CASCADE,
+    region TEXT,
+    store TEXT,
+    position TEXT,
+    tab_number TEXT,
+    name TEXT,
+    material REAL,
+    test REAL,
+    test_date TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_lesson_report_details_report ON lesson_report_details(lesson_report_id);
 """
 
 DEFAULT_POSITIONS = [

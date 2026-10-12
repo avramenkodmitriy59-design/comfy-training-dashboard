@@ -14,6 +14,7 @@ from aggregate import (
     clean_aep_row, aep_goal_for_quarter, aggregate_aep, distribution_aep,
     normalize_person_name, normalize_roster_tier, build_roster_matcher, find_near_duplicate_names,
     suggest_name_matches, find_roster_duplicate_rows, clean_director_report_row,
+    clean_lesson_report_row,
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1365,6 +1366,209 @@ def director_report_top():
         })
     people.sort(key=lambda p: -p["rankScore"])
     return jsonify({"people": people[:100]})
+
+
+# ---------- "Звіт по заняттям" — single-training-session reports ----------
+
+@app.post("/api/upload-lesson-report")
+def upload_lesson_report():
+    data = request.get_json(silent=True) or {}
+    lesson_key = str(data.get("lessonKey", "")).strip()
+    title = str(data.get("title", "")).strip()
+    raw_rows = data.get("rows") or []
+    if not lesson_key or not title:
+        return jsonify({"error": "Не вдалося визначити номер і назву заняття з файлу"}), 400
+    if not raw_rows:
+        return jsonify({"error": "У файлі не знайдено жодного рядка учасників"}), 400
+
+    rows = [clean_lesson_report_row(r) for r in raw_rows]
+    rows = [r for r in rows if r["name"]]
+
+    conn = db.get_db()
+    try:
+        conn.execute("BEGIN")
+        existing = conn.execute(
+            "SELECT id FROM lesson_reports WHERE lesson_key=?", (lesson_key,)
+        ).fetchone()
+        uploaded_at = datetime.datetime.utcnow().isoformat() + "Z"
+        if existing:
+            lesson_report_id = existing["id"]
+            conn.execute(
+                "UPDATE lesson_reports SET title=?, uploaded_at=? WHERE id=?",
+                (title, uploaded_at, lesson_report_id),
+            )
+            conn.execute("DELETE FROM lesson_report_details WHERE lesson_report_id=?", (lesson_report_id,))
+        else:
+            cur = conn.execute(
+                "INSERT INTO lesson_reports (lesson_key, title, uploaded_at) VALUES (?,?,?)",
+                (lesson_key, title, uploaded_at),
+            )
+            lesson_report_id = cur.lastrowid
+
+        for r in rows:
+            conn.execute(
+                "INSERT INTO lesson_report_details (lesson_report_id, region, store, position, "
+                "tab_number, name, material, test, test_date) VALUES (?,?,?,?,?,?,?,?,?)",
+                (lesson_report_id, r["region"], r["store"], r["position"], r["tabNumber"],
+                 r["name"], r["material"], r["test"], r["testDate"]),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return jsonify({"ok": True, "lessonReportId": lesson_report_id, "rowsCount": len(rows)})
+
+
+@app.get("/api/lesson-reports")
+def list_lesson_reports():
+    conn = db.get_db()
+    rows = conn.execute(
+        "SELECT id, lesson_key, title, uploaded_at FROM lesson_reports ORDER BY uploaded_at ASC"
+    ).fetchall()
+    conn.close()
+    return jsonify({"lessons": [
+        {"id": r["id"], "lessonKey": r["lesson_key"], "title": r["title"], "uploadedAt": r["uploaded_at"]}
+        for r in rows
+    ]})
+
+
+def _lesson_report_where(args):
+    clauses = ["lesson_report_id=?"]
+    params = [args.get("lessonReportId")]
+    if args.get("region"):
+        clauses.append("region=?")
+        params.append(args["region"])
+    if args.get("store"):
+        clauses.append("store=?")
+        params.append(args["store"])
+    if args.get("position"):
+        clauses.append("position=?")
+        params.append(args["position"])
+    return " AND ".join(clauses), params
+
+
+@app.get("/api/lesson-report-filters")
+def lesson_report_filters():
+    lesson_report_id = request.args.get("lessonReportId")
+    if not lesson_report_id:
+        return jsonify({"error": "lessonReportId обов'язковий"}), 400
+    region = request.args.get("region")
+    conn = db.get_db()
+    regions = conn.execute(
+        "SELECT DISTINCT region FROM lesson_report_details WHERE lesson_report_id=? AND region != '' ORDER BY region",
+        (lesson_report_id,),
+    ).fetchall()
+    store_where = "lesson_report_id=? AND store != ''"
+    store_params = [lesson_report_id]
+    if region:
+        store_where += " AND region=?"
+        store_params.append(region)
+    stores = conn.execute(
+        f"SELECT DISTINCT store FROM lesson_report_details WHERE {store_where} ORDER BY store",
+        store_params,
+    ).fetchall()
+    positions = conn.execute(
+        "SELECT DISTINCT position FROM lesson_report_details WHERE lesson_report_id=? AND position != '' ORDER BY position",
+        (lesson_report_id,),
+    ).fetchall()
+    conn.close()
+    return jsonify({
+        "regions": [r["region"] for r in regions],
+        "stores": [r["store"] for r in stores],
+        "positions": [r["position"] for r in positions],
+    })
+
+
+@app.get("/api/lesson-report-summary")
+def lesson_report_summary():
+    if not request.args.get("lessonReportId"):
+        return jsonify({"error": "lessonReportId обов'язковий"}), 400
+    where, params = _lesson_report_where(request.args)
+    conn = db.get_db()
+    row = conn.execute(
+        f"SELECT AVG(material) AS material, AVG(test) AS test, COUNT(*) AS total, "
+        f"SUM(CASE WHEN test >= 100 THEN 1 ELSE 0 END) AS passed "
+        f"FROM lesson_report_details WHERE {where}",
+        params,
+    ).fetchone()
+    conn.close()
+    return jsonify({
+        "material": round(row["material"], 1) if row["material"] is not None else None,
+        "test": round(row["test"], 1) if row["test"] is not None else None,
+        "total": row["total"],
+        "passed": row["passed"],
+    })
+
+
+@app.get("/api/lesson-report-by-region")
+def lesson_report_by_region():
+    """Always the full region breakdown (ignores region/store/position
+    filters) — an at-a-glance table across every region regardless of
+    what's currently selected."""
+    lesson_report_id = request.args.get("lessonReportId")
+    if not lesson_report_id:
+        return jsonify({"error": "lessonReportId обов'язковий"}), 400
+    conn = db.get_db()
+    rows = conn.execute(
+        "SELECT region, AVG(test) AS test, AVG(material) AS material, COUNT(*) AS total "
+        "FROM lesson_report_details WHERE lesson_report_id=? AND region != '' "
+        "GROUP BY region ORDER BY test DESC",
+        (lesson_report_id,),
+    ).fetchall()
+    conn.close()
+    return jsonify({"regions": [{
+        "region": r["region"],
+        "test": round(r["test"], 1) if r["test"] is not None else None,
+        "material": round(r["material"], 1) if r["material"] is not None else None,
+        "total": r["total"],
+    } for r in rows]})
+
+
+@app.get("/api/lesson-report-people")
+def lesson_report_people():
+    if not request.args.get("lessonReportId"):
+        return jsonify({"error": "lessonReportId обов'язковий"}), 400
+    where, params = _lesson_report_where(request.args)
+    search = request.args.get("search")
+    if search:
+        where += " AND name LIKE ?"
+        params = params + [f"%{search}%"]
+    conn = db.get_db()
+    rows = conn.execute(
+        f"SELECT region, store, position, name, material, test, test_date "
+        f"FROM lesson_report_details WHERE {where} ORDER BY test ASC, material ASC",
+        params,
+    ).fetchall()
+    conn.close()
+    return jsonify({"people": [{
+        "region": r["region"], "store": r["store"], "position": r["position"], "name": r["name"],
+        "material": r["material"], "test": r["test"], "testDate": r["test_date"],
+    } for r in rows]})
+
+
+@app.get("/api/lesson-report-raw")
+def lesson_report_raw():
+    """All rows for one lesson, unfiltered — used only by the client-side
+    HTML export, which bakes them into the downloaded file so filtering
+    keeps working with zero server round trips once it's out of the
+    browser."""
+    lesson_report_id = request.args.get("lessonReportId")
+    if not lesson_report_id:
+        return jsonify({"error": "lessonReportId обов'язковий"}), 400
+    conn = db.get_db()
+    rows = conn.execute(
+        "SELECT region, store, position, name, material, test, test_date "
+        "FROM lesson_report_details WHERE lesson_report_id=?",
+        (lesson_report_id,),
+    ).fetchall()
+    conn.close()
+    return jsonify({"rows": [{
+        "region": r["region"], "store": r["store"], "position": r["position"], "name": r["name"],
+        "material": r["material"], "test": r["test"], "testDate": r["test_date"],
+    } for r in rows]})
 
 
 # ---------- periods / trend ----------

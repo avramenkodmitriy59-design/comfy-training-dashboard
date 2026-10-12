@@ -47,6 +47,7 @@ const state = {
   charts: {},
   loading: false,
   directorReport: { year: null, quarter: null, region: '', store: '', periods: [] },
+  lessonReport: { lessons: [], lessonReportId: null, region: '', store: '', position: '', search: '' },
 };
 
 /* ===================== utils ===================== */
@@ -577,6 +578,59 @@ async function readDirectorReportWorkbookRows(file) {
   return extractDirectorReportRows(sheetRows);
 }
 
+// "Звіт по заняттю #1732: Прийом товару від постачальника" — a per-person
+// result list for ONE specific training session. Title row carries the
+// lesson number + name; that number is the upsert key (re-uploading the
+// same lesson replaces it).
+function extractLessonReportRows(sheetRows) {
+  if (!sheetRows || sheetRows.length < 3) throw new Error('Файл порожній або має неочікувану структуру');
+  const titleRaw = String(sheetRows[0]?.[0] || '');
+  const m = /#(\d+)\s*:\s*(.+)/.exec(titleRaw);
+  if (!m) throw new Error('Не вдалося розпізнати заголовок «Звіт по заняттю #N: ...» у першому рядку файлу');
+  const lessonKey = m[1];
+  const title = m[2].trim();
+
+  let headerIdx = -1, cols = null;
+  for (let i = 0; i < sheetRows.length; i++) {
+    const row = sheetRows[i];
+    if (!row || !row.length) continue;
+    const asStr = row.map((c) => String(c || '').trim());
+    if (asStr.includes('ПІБ') && asStr.includes('Тест')) { headerIdx = i; cols = asStr; break; }
+  }
+  if (headerIdx === -1) throw new Error('Не знайдено заголовок таблиці (очікувались колонки «ПІБ», «Тест»)');
+  const idx = {
+    region: cols.indexOf('Регіон'), store: cols.indexOf('Магазин'), position: cols.indexOf('Посада'),
+    tabNumber: cols.indexOf('Таб. номер'), name: cols.indexOf('ПІБ'),
+    material: cols.indexOf('Матеріал'), test: cols.indexOf('Тест'),
+    testDate: cols.indexOf('Дата проходження тесту'),
+  };
+  const rows = [];
+  for (let i = headerIdx + 1; i < sheetRows.length; i++) {
+    const row = sheetRows[i];
+    if (!row || !row[idx.name]) continue;
+    const d = idx.testDate > -1 ? parseAepDate(row[idx.testDate]) : null;
+    rows.push({
+      region: String(row[idx.region] || '').trim(),
+      store: String(row[idx.store] || '').trim(),
+      position: String(row[idx.position] || '').trim(),
+      tabNumber: String(row[idx.tabNumber] || '').trim(),
+      name: String(row[idx.name] || '').trim(),
+      material: parsePercent(row[idx.material]),
+      test: parsePercent(row[idx.test]),
+      testDate: d ? d.toLocaleDateString('uk-UA') : '',
+    });
+  }
+  return { lessonKey, title, rows };
+}
+
+async function readLessonReportWorkbookRows(file) {
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const sheetRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: true });
+  return extractLessonReportRows(sheetRows);
+}
+
 function detectAttestationPositionClient(rows) {
   const counts = {};
   rows.forEach((r) => { if (r.position) counts[r.position] = (counts[r.position] || 0) + 1; });
@@ -725,6 +779,8 @@ function bindTabs() {
 function renderPositionSwitch() {
   const reportBtn = document.getElementById('btn-director-report');
   if (reportBtn) reportBtn.hidden = state.tab !== 'overall';
+  const lessonReportBtn = document.getElementById('btn-lesson-report');
+  if (lessonReportBtn) lessonReportBtn.hidden = state.tab !== 'overall';
   const el = document.getElementById('position-switch');
   if (state.tab === 'attestation') {
     el.hidden = false;
@@ -2392,7 +2448,7 @@ function renderDirectorReportShell() {
   view.innerHTML = `
     <div class="top-bar">
       <div class="brand">
-        <img class="logo" src="/static/assets/logo_green.png" alt="COMFY">
+        <img class="logo" src="static/assets/logo_green.png" alt="COMFY">
         <div>
           <div class="brand-title">Звіт для РК</div>
           <div class="brand-subtitle">АТТ і додаткове навчання директорів</div>
@@ -3219,6 +3275,507 @@ render();
 </body></html>`;
 }
 
+/* ===================== lesson report ("Звіт по заняттям") =====================
+   Separate full-screen view for per-training-session reports — one upload
+   is one specific lesson (e.g. "Звіт по заняттю #1732: Прийом товару від
+   постачальника"), switchable between every lesson ever uploaded. Unlike
+   the director report's quarters, lessons aren't periodic: each is its own
+   permanent snapshot, and re-uploading the same lesson number replaces it
+   in place (upsert by lesson number, same shape as AEP/director report). */
+
+async function openLessonReportView() {
+  document.getElementById('app').hidden = true;
+  const view = document.getElementById('lesson-report-view');
+  view.hidden = false;
+  renderLessonReportShell();
+  await loadLessonReports();
+}
+
+function closeLessonReportView() {
+  document.getElementById('lesson-report-view').hidden = true;
+  document.getElementById('app').hidden = false;
+}
+
+function renderLessonReportShell() {
+  const view = document.getElementById('lesson-report-view');
+  view.innerHTML = `
+    <div class="top-bar">
+      <div class="brand">
+        <img class="logo" src="static/assets/logo_green.png" alt="COMFY">
+        <div>
+          <div class="brand-title">Звіт по заняттям</div>
+          <div class="brand-subtitle">Результати по окремих заняттях</div>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button class="btn btn-primary btn-sm" id="lr-upload">Завантажити заняття</button>
+        <button class="btn btn-secondary btn-sm" id="lr-download-html">Завантажити HTML</button>
+        <button class="btn btn-secondary btn-sm" id="lr-back">← Назад у систему</button>
+      </div>
+    </div>
+    <div id="lr-content-area">
+      <!-- filled dynamically -->
+    </div>
+  `;
+  document.getElementById('lr-back').onclick = closeLessonReportView;
+  document.getElementById('lr-download-html').onclick = downloadLessonReportHtml;
+  document.getElementById('lr-upload').onclick = openLessonReportUploadModal;
+}
+
+function openLessonReportUploadModal() {
+  const root = document.getElementById('modal-root');
+  root.innerHTML = `
+    <div class="modal-backdrop" id="lr-upload-backdrop">
+      <div class="modal">
+        <button class="modal-close" id="lr-upload-close">✕</button>
+        <h2>Завантажити заняття</h2>
+        <p class="modal-subtitle">Файл «Звіт по заняттю» з LMS — номер і назва заняття визначаються автоматично з першого рядка файлу. Повторне завантаження того самого номера заняття замінює його повністю (оновлена версія).</p>
+        <div class="field-group">
+          <label>Файл</label>
+          <input type="file" id="lr-upload-file" accept=".xls,.xlsx">
+        </div>
+        <div id="lr-upload-preview"></div>
+        <div id="lr-upload-error" class="error-text"></div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" id="lr-upload-cancel">Скасувати</button>
+          <button class="btn btn-primary" id="lr-upload-parse">Перевірити файл</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.getElementById('lr-upload-close').onclick = closeModal;
+  document.getElementById('lr-upload-cancel').onclick = closeModal;
+  document.getElementById('lr-upload-backdrop').addEventListener('click', (e) => {
+    if (e.target.id === 'lr-upload-backdrop') closeModal();
+  });
+  document.getElementById('lr-upload-parse').onclick = handleLessonReportParse;
+}
+
+async function handleLessonReportParse() {
+  const errorEl = document.getElementById('lr-upload-error');
+  errorEl.textContent = '';
+  const file = document.getElementById('lr-upload-file').files[0];
+  if (!file) { errorEl.textContent = 'Оберіть файл.'; return; }
+
+  let parsed;
+  try {
+    parsed = await readLessonReportWorkbookRows(file);
+  } catch (e) {
+    errorEl.textContent = `Помилка читання файлу: ${e.message}`;
+    return;
+  }
+  if (!parsed.rows.length) {
+    errorEl.textContent = 'Не знайдено жодного рядка учасників у файлі.';
+    return;
+  }
+
+  const existing = state.lessonReport.lessons.find((l) => l.lessonKey === parsed.lessonKey);
+  document.getElementById('lr-upload-preview').innerHTML = `
+    <div class="upload-summary">Заняття #${escapeHtml(parsed.lessonKey)}: «${escapeHtml(parsed.title)}» — ${parsed.rows.length} учасників.${existing ? ' Це заняття вже є в базі — буде повністю оновлено (свіжа версія замінить попередню).' : ' Нове заняття.'}</div>
+  `;
+  const actions = document.querySelector('#lr-upload-backdrop .modal-actions');
+  actions.innerHTML = `
+    <button class="btn btn-secondary" id="lr-upload-cancel2">Скасувати</button>
+    <button class="btn btn-primary" id="lr-upload-save">Зберегти</button>
+  `;
+  document.getElementById('lr-upload-cancel2').onclick = closeModal;
+  document.getElementById('lr-upload-save').onclick = async () => {
+    const btn = document.getElementById('lr-upload-save');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Збереження…';
+    try {
+      const resp = await api('/api/upload-lesson-report', {
+        method: 'POST',
+        body: JSON.stringify({ lessonKey: parsed.lessonKey, title: parsed.title, rows: parsed.rows }),
+      });
+      closeModal();
+      showToast(`Заняття «${parsed.title}» збережено: ${resp.rowsCount} учасників.`);
+      await loadLessonReports(resp.lessonReportId);
+    } catch (e) {
+      document.getElementById('lr-upload-error').textContent = e.message;
+      btn.disabled = false;
+      btn.textContent = 'Зберегти';
+    }
+  };
+}
+
+async function loadLessonReports(selectId) {
+  const data = await api('/api/lesson-reports');
+  state.lessonReport.lessons = data.lessons || [];
+  if (!state.lessonReport.lessons.length) {
+    document.getElementById('lr-content-area').innerHTML = `
+      <div class="empty-state">
+        <h2>Ще немає занять</h2>
+        <p>Натисніть «Завантажити заняття» вгорі, щоб додати перший звіт.</p>
+      </div>`;
+    return;
+  }
+  const latest = state.lessonReport.lessons[state.lessonReport.lessons.length - 1];
+  const wanted = selectId || state.lessonReport.lessonReportId;
+  state.lessonReport.lessonReportId = state.lessonReport.lessons.some((l) => l.id === wanted)
+    ? wanted
+    : latest.id;
+  renderLessonReportContent();
+  await refreshLessonReportFilters();
+  await refreshLessonReportData();
+}
+
+function renderLessonReportContent() {
+  const { lessons, lessonReportId } = state.lessonReport;
+  const el = document.getElementById('lr-content-area');
+  const sortedLessons = [...lessons].reverse();
+  const mostRecentId = lessons[lessons.length - 1]?.id;
+  el.innerHTML = `
+    <div class="filters" id="lr-filters">
+      <div class="filter-field" style="min-width:280px;">
+        <label>Заняття</label>
+        <select id="lr-lesson">
+          ${sortedLessons.map((l) => `<option value="${l.id}" ${l.id === lessonReportId ? 'selected' : ''}>#${escapeHtml(l.lessonKey)}: ${escapeHtml(l.title)}${l.id === mostRecentId ? ' (останнє)' : ''}</option>`).join('')}
+        </select>
+        <div class="field-hint" id="lr-updated-hint"></div>
+      </div>
+      <div class="filter-field">
+        <label>Регіон</label>
+        <select id="lr-region"><option value="">Усі регіони</option></select>
+      </div>
+      <div class="filter-field">
+        <label>Магазин</label>
+        <select id="lr-store"><option value="">Усі магазини</option></select>
+      </div>
+      <div class="filter-field">
+        <label>Посада</label>
+        <select id="lr-position"><option value="">Усі посади</option></select>
+      </div>
+      <div class="filter-field" style="min-width:220px;">
+        <label>Пошук за ПІБ</label>
+        <input type="text" id="lr-search" placeholder="Прізвище, ім'я...">
+      </div>
+    </div>
+    <div class="kpi-grid" id="lr-kpi-grid"></div>
+    <div class="card">
+      <h3>По регіонах</h3>
+      <p class="field-hint">Завжди всі регіони, незалежно від фільтра вище.</p>
+      <div class="table-scroll"><table class="data-table" id="lr-regions-table"></table></div>
+    </div>
+    <div class="card">
+      <h3>Учасники</h3>
+      <p class="field-hint" id="lr-count-hint"></p>
+      <div class="table-scroll"><table class="data-table" id="lr-people-table"></table></div>
+      <div id="lr-people-pagination"></div>
+    </div>
+  `;
+  const updatedHint = document.getElementById('lr-updated-hint');
+  const current = lessons.find((l) => l.id === lessonReportId);
+  if (updatedHint && current) updatedHint.textContent = `Востаннє оновлено: ${fmtUploadedAt(current.uploadedAt)}`;
+
+  document.getElementById('lr-lesson').addEventListener('change', async (e) => {
+    state.lessonReport.lessonReportId = Number(e.target.value);
+    state.lessonReport.region = '';
+    state.lessonReport.store = '';
+    state.lessonReport.position = '';
+    state.lessonReport.search = '';
+    renderLessonReportContent();
+    await refreshLessonReportFilters();
+    await refreshLessonReportData();
+  });
+  document.getElementById('lr-region').addEventListener('change', async (e) => {
+    state.lessonReport.region = e.target.value;
+    state.lessonReport.store = '';
+    await refreshLessonReportFilters();
+    await refreshLessonReportData();
+  });
+  document.getElementById('lr-store').addEventListener('change', async (e) => {
+    state.lessonReport.store = e.target.value;
+    await refreshLessonReportData();
+  });
+  document.getElementById('lr-position').addEventListener('change', async (e) => {
+    state.lessonReport.position = e.target.value;
+    await refreshLessonReportData();
+  });
+  let searchDebounce;
+  document.getElementById('lr-search').addEventListener('input', (e) => {
+    clearTimeout(searchDebounce);
+    const value = e.target.value;
+    searchDebounce = setTimeout(async () => {
+      state.lessonReport.search = value;
+      await refreshLessonReportData();
+    }, 250);
+  });
+}
+
+async function refreshLessonReportFilters() {
+  const { lessonReportId, region, store, position } = state.lessonReport;
+  const data = await api(`/api/lesson-report-filters?${qs({ lessonReportId, region })}`);
+  const regionSelect = document.getElementById('lr-region');
+  const storeSelect = document.getElementById('lr-store');
+  const positionSelect = document.getElementById('lr-position');
+  regionSelect.innerHTML = `<option value="">Усі регіони</option>${(data.regions || []).map((r) => `<option value="${escapeHtml(r)}" ${r === region ? 'selected' : ''}>${escapeHtml(r)}</option>`).join('')}`;
+  storeSelect.innerHTML = `<option value="">Усі магазини</option>${(data.stores || []).map((s) => `<option value="${escapeHtml(s)}" ${s === store ? 'selected' : ''}>${escapeHtml(s)}</option>`).join('')}`;
+  positionSelect.innerHTML = `<option value="">Усі посади</option>${(data.positions || []).map((p) => `<option value="${escapeHtml(p)}" ${p === position ? 'selected' : ''}>${escapeHtml(p)}</option>`).join('')}`;
+}
+
+async function refreshLessonReportData() {
+  const { lessonReportId, region, store, position, search } = state.lessonReport;
+  const params = { lessonReportId, region, store, position, search };
+  const [summary, byRegion, people] = await Promise.all([
+    api(`/api/lesson-report-summary?${qs(params)}`),
+    api(`/api/lesson-report-by-region?${qs({ lessonReportId })}`),
+    api(`/api/lesson-report-people?${qs(params)}`),
+  ]);
+  renderLessonReportKpis(summary);
+  renderLessonReportByRegion(byRegion.regions || []);
+  state._lrPeople = people.people || [];
+  resetPageState('lr-people');
+  renderLessonReportPeopleTable();
+}
+
+function renderLessonReportKpis(summary) {
+  const tiles = [
+    { label: 'Пройшли матеріал', value: fmtPct(summary.material), accent: 'green' },
+    { label: 'Середній бал тесту', value: fmtPct(summary.test), accent: '' },
+    { label: 'Склали тест (100%)', value: `${fmtNum(summary.passed)} з ${fmtNum(summary.total)}`, accent: '' },
+  ];
+  document.getElementById('lr-kpi-grid').innerHTML = tiles.map((tl) => `
+    <div class="kpi-tile ${tl.accent ? `accent-${tl.accent}` : ''}">
+      <div class="kpi-value">${tl.value}</div>
+      <div class="kpi-label">${escapeHtml(tl.label)}</div>
+    </div>`).join('');
+}
+
+function renderLessonReportByRegion(regions) {
+  const table = document.getElementById('lr-regions-table');
+  table.innerHTML = `
+    <thead><tr><th>Регіон</th><th>Середній тест</th><th>Матеріал</th><th>Учасників</th></tr></thead>
+    <tbody>${regions.map((r) => `
+      <tr>
+        <td>${escapeHtml(r.region)}</td>
+        <td>${progressCellHtml(r.test)}</td>
+        <td>${progressCellHtml(r.material)}</td>
+        <td>${fmtNum(r.total)}</td>
+      </tr>`).join('') || `<tr><td colspan="4" class="muted">Немає даних</td></tr>`}</tbody>
+  `;
+}
+
+function renderLessonReportPeopleTable() {
+  const rows = state._lrPeople || [];
+  const key = 'lr-people';
+  const table = document.getElementById('lr-people-table');
+  const pageRows = pageSlice(key, rows);
+  table.innerHTML = `
+    <thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Посада</th><th>Матеріал</th><th>Тест</th><th>Дата тесту</th></tr></thead>
+    <tbody>${pageRows.map((p) => `
+      <tr>
+        <td>${escapeHtml(p.name)}</td>
+        <td>${escapeHtml(p.region)}</td>
+        <td>${escapeHtml(p.store)}</td>
+        <td>${escapeHtml(p.position)}</td>
+        <td>${progressCellHtml(p.material)}</td>
+        <td>${progressCellHtml(p.test)}</td>
+        <td>${escapeHtml(p.testDate || '—')}</td>
+      </tr>`).join('') || `<tr><td colspan="7" class="muted">Немає даних за цим фільтром</td></tr>`}</tbody>
+  `;
+  const hint = document.getElementById('lr-count-hint');
+  if (hint) hint.textContent = `Показано ${rows.length} учасників. Відсортовано від найгіршого результату тесту.`;
+  const pager = document.getElementById('lr-people-pagination');
+  pager.innerHTML = paginationBarHtml(key, rows.length);
+  wirePagination(pager, key, renderLessonReportPeopleTable);
+}
+
+// Same self-contained export pattern as the director report: bakes every
+// raw row into the file plus a small inline script that redoes the same
+// filtering/aggregation, so region/store/position/search keep working
+// fully offline once the file has left the browser.
+async function downloadLessonReportHtml() {
+  const { lessonReportId, lessons } = state.lessonReport;
+  const lesson = lessons.find((l) => l.id === lessonReportId);
+  if (!lesson) return;
+  const btn = document.getElementById('lr-download-html');
+  if (btn) { btn.disabled = true; btn.textContent = 'Готую файл…'; }
+  try {
+    const [rawData, css, logoDataUrl, comfySemiBold, ptRegular, ptMedium, ptBold] = await Promise.all([
+      api(`/api/lesson-report-raw?${qs({ lessonReportId })}`),
+      fetch('static/css/style.css').then((r) => r.text()).catch(() => ''),
+      fetchAsDataUrl('/static/assets/logo_green.png'),
+      fetchAsDataUrl('/static/fonts/ComfySemiBold/Comfy-Semi-Bold.woff2'),
+      fetchAsDataUrl('/static/fonts/PTRootUI/PT-Root-UI-Regular.woff2'),
+      fetchAsDataUrl('/static/fonts/PTRootUI/PT-Root-UI-Medium.woff2'),
+      fetchAsDataUrl('/static/fonts/PTRootUI/PT-Root-UI-Bold.woff2'),
+    ]);
+    const fontCss = `
+@font-face { font-family: 'Comfy Semi-Bold'; src: url('${comfySemiBold}') format('woff2'); font-weight: 600; font-style: normal; }
+@font-face { font-family: 'PT Root UI'; src: url('${ptRegular}') format('woff2'); font-weight: 400; font-style: normal; }
+@font-face { font-family: 'PT Root UI'; src: url('${ptMedium}') format('woff2'); font-weight: 500; font-style: normal; }
+@font-face { font-family: 'PT Root UI'; src: url('${ptBold}') format('woff2'); font-weight: 700; font-style: normal; }
+`;
+    const inlinedCss = fontCss + css.replace(/@font-face\s*\{[^}]*\}/g, '');
+    const title = `Звіт по заняттю #${lesson.lessonKey}: ${lesson.title}`;
+    const rowsJson = JSON.stringify(rawData.rows || []).replace(/<\/script/gi, '<\\/script');
+    const html = buildLessonReportExportHtml({ title, css: inlinedCss, logoDataUrl, rowsJson });
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Звіт - ${lesson.title} (${lesson.lessonKey}).html`.replace(/[\\/:*?"<>|]/g, '_');
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    showToast(`Не вдалося згенерувати файл: ${e.message}`, true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Завантажити HTML'; }
+  }
+}
+
+function buildLessonReportExportHtml({ title, css, logoDataUrl, rowsJson }) {
+  return `<!doctype html>
+<html lang="uk"><head><meta charset="utf-8">
+<title>${escapeHtml(title)}</title>
+<style>${css}
+body { background: var(--color-bg); padding: 24px; }
+</style>
+</head><body>
+<div class="top-bar" style="margin-bottom:20px;">
+  <div class="brand">
+    ${logoDataUrl ? `<img class="logo" src="${logoDataUrl}" alt="COMFY">` : ''}
+    <div>
+      <div class="brand-title">${escapeHtml(title)}</div>
+      <div class="brand-subtitle">Звіт по проходженню навчання · Знято ${new Date().toLocaleDateString('uk-UA')}</div>
+    </div>
+  </div>
+</div>
+<div class="filters" id="x-filters">
+  <div class="filter-field">
+    <label>Регіон</label>
+    <select id="x-region"><option value="">Усі регіони</option></select>
+  </div>
+  <div class="filter-field">
+    <label>Магазин</label>
+    <select id="x-store"><option value="">Усі магазини</option></select>
+  </div>
+  <div class="filter-field">
+    <label>Посада</label>
+    <select id="x-position"><option value="">Усі посади</option></select>
+  </div>
+  <div class="filter-field" style="min-width:220px;">
+    <label>Пошук за ПІБ</label>
+    <input type="text" id="x-search" placeholder="Прізвище, ім'я...">
+  </div>
+</div>
+<div class="kpi-grid" id="x-kpi"></div>
+<div class="card">
+  <h3>По регіонах</h3>
+  <p class="field-hint">Завжди всі регіони, незалежно від фільтра вище.</p>
+  <div class="table-scroll"><table class="data-table" id="x-regions"></table></div>
+</div>
+<div class="card">
+  <h3>Учасники</h3>
+  <p class="field-hint" id="x-count-hint"></p>
+  <div class="table-scroll"><table class="data-table" id="x-people"></table></div>
+</div>
+<script>
+'use strict';
+const ROWS = ${rowsJson};
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function fmtPct(v) { return v === null || v === undefined || Number.isNaN(v) ? '—' : (Math.round(v * 10) / 10) + '%'; }
+function bucket(v) {
+  if (v === null || v === undefined || Number.isNaN(v)) return 'red';
+  if (v >= 90) return 'good'; if (v >= 70) return 'yellow'; if (v >= 40) return 'orange'; return 'red';
+}
+function progressCell(v) {
+  const pct = Math.max(0, Math.min(100, v || 0));
+  return '<div class="progress-cell"><div class="progress-bar-track"><div class="progress-bar-fill fill-' + bucket(v) + '" style="width:' + pct + '%"></div></div><div class="value">' + fmtPct(v) + '</div></div>';
+}
+function avg(arr) { return arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : null; }
+
+function stats(rows) {
+  return {
+    material: avg(rows.map((r) => r.material)),
+    test: avg(rows.map((r) => r.test)),
+    passed: rows.filter((r) => r.test >= 100).length,
+    total: rows.length,
+  };
+}
+function byRegionOf() {
+  const regions = [...new Set(ROWS.map((r) => r.region).filter(Boolean))];
+  return regions.map((region) => ({ region, ...stats(ROWS.filter((r) => r.region === region)) }))
+    .sort((a, b) => (b.test ?? -1) - (a.test ?? -1));
+}
+
+function filteredRows() {
+  const region = document.getElementById('x-region').value;
+  const store = document.getElementById('x-store').value;
+  const position = document.getElementById('x-position').value;
+  const search = document.getElementById('x-search').value.trim().toLowerCase();
+  return ROWS.filter((r) =>
+    (!region || r.region === region) &&
+    (!store || r.store === store) &&
+    (!position || r.position === position) &&
+    (!search || r.name.toLowerCase().includes(search))
+  );
+}
+
+function renderKpi(s) {
+  const tiles = [
+    ['Пройшли матеріал', fmtPct(s.material), 'accent-green'],
+    ['Середній бал тесту', fmtPct(s.test), ''],
+    ['Склали тест (100%)', s.passed + ' з ' + s.total, ''],
+  ];
+  document.getElementById('x-kpi').innerHTML = tiles.map((t) =>
+    '<div class="kpi-tile ' + t[2] + '"><div class="kpi-value">' + t[1] + '</div><div class="kpi-label">' + esc(t[0]) + '</div></div>'
+  ).join('');
+}
+function renderRegions(regions) {
+  document.getElementById('x-regions').innerHTML =
+    '<thead><tr><th>Регіон</th><th>Середній тест</th><th>Матеріал</th><th>Учасників</th></tr></thead><tbody>' +
+    (regions.map((r) => '<tr><td>' + esc(r.region) + '</td><td>' + progressCell(r.test) + '</td><td>' + progressCell(r.material) + '</td><td>' + r.total + '</td></tr>').join('')
+      || '<tr><td colspan="4" class="muted">Немає даних</td></tr>') + '</tbody>';
+}
+function renderPeople(rows) {
+  const sorted = [...rows].sort((a, b) => a.test - b.test || a.material - b.material);
+  document.getElementById('x-people').innerHTML =
+    '<thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Посада</th><th>Матеріал</th><th>Тест</th><th>Дата тесту</th></tr></thead><tbody>' +
+    (sorted.map((r) => '<tr><td>' + esc(r.name) + '</td><td>' + esc(r.region) + '</td><td>' + esc(r.store) + '</td><td>' + esc(r.position) + '</td><td>' + progressCell(r.material) + '</td><td>' + progressCell(r.test) + '</td><td>' + esc(r.testDate || '—') + '</td></tr>').join('')
+      || '<tr><td colspan="7" class="muted">Немає даних за цим фільтром</td></tr>') + '</tbody>';
+  document.getElementById('x-count-hint').textContent = 'Показано ' + sorted.length + ' з ' + ROWS.length + ' учасників. Відсортовано від найгіршого результату тесту.';
+}
+
+function render() {
+  const rows = filteredRows();
+  renderKpi(stats(rows));
+  renderPeople(rows);
+}
+
+function populateFilters() {
+  const regionSelect = document.getElementById('x-region');
+  const storeSelect = document.getElementById('x-store');
+  const positionSelect = document.getElementById('x-position');
+  const regions = [...new Set(ROWS.map((r) => r.region).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'uk'));
+  const positions = [...new Set(ROWS.map((r) => r.position).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'uk'));
+  regionSelect.innerHTML = '<option value="">Усі регіони</option>' + regions.map((r) => '<option value="' + esc(r) + '">' + esc(r) + '</option>').join('');
+  positionSelect.innerHTML = '<option value="">Усі посади</option>' + positions.map((p) => '<option value="' + esc(p) + '">' + esc(p) + '</option>').join('');
+  function refreshStoreOptions() {
+    const region = regionSelect.value;
+    const stores = [...new Set(ROWS.filter((r) => !region || r.region === region).map((r) => r.store).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'uk'));
+    storeSelect.innerHTML = '<option value="">Усі магазини</option>' + stores.map((s) => '<option value="' + esc(s) + '">' + esc(s) + '</option>').join('');
+  }
+  refreshStoreOptions();
+  regionSelect.addEventListener('change', () => { storeSelect.value = ''; refreshStoreOptions(); render(); });
+  storeSelect.addEventListener('change', render);
+  positionSelect.addEventListener('change', render);
+  document.getElementById('x-search').addEventListener('input', render);
+}
+
+populateFilters();
+renderRegions(byRegionOf());
+render();
+</script>
+</body></html>`;
+}
+
 /* ===================== init ===================== */
 
 function bindTopActions() {
@@ -3228,6 +3785,7 @@ function bindTopActions() {
   document.getElementById('btn-upload').addEventListener('click', openUploadModal);
   document.getElementById('btn-classify').addEventListener('click', openClassifyModal);
   document.getElementById('btn-director-report').addEventListener('click', openDirectorReportView);
+  document.getElementById('btn-lesson-report').addEventListener('click', openLessonReportView);
 }
 
 bindTabs();
