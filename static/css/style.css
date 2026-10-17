@@ -263,13 +263,13 @@ a { color: var(--color-green-dark); }
 .kpi-tile.accent-muted { opacity: 0.85; }
 
 /* Director report and lesson report have only 3 KPI tiles (vs the main
-   dashboard's 7+), category analysis has 4, so they get their own column
+   dashboard's 7+), category analysis has 5, so they get their own column
    count and larger value text instead of leaving an empty column. */
 #dr-kpi-grid, #lr-kpi-grid, #x-kpi {
   grid-template-columns: repeat(3, 1fr);
 }
 #ca-kpi-grid {
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
 }
 #dr-kpi-grid .kpi-value, #lr-kpi-grid .kpi-value, #ca-kpi-grid .kpi-value, #x-kpi .kpi-value { font-size: 38px; }
 #dr-kpi-grid .kpi-label, #lr-kpi-grid .kpi-label, #ca-kpi-grid .kpi-label, #x-kpi .kpi-label { font-size: 14px; }

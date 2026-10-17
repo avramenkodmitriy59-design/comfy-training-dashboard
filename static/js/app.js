@@ -332,6 +332,12 @@ function aepQuarterOf(d) {
   return Math.floor(d.getMonth() / 3) + 1;
 }
 
+function formatIsoDate(d) {
+  if (!d) return '';
+  const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0'), day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 // "Поточний" badge on a period selector means "this is the real calendar
 // quarter right now" — not "the most recently uploaded period", which can
 // lag behind once a new quarter starts before that quarter's data exists.
@@ -664,6 +670,7 @@ function extractCategoryReportRows(sheetRows) {
     unaccountedFlag: cols.indexOf('Неоприбуткований товар'),
     pickupSpeedRaw: cols.indexOf('Швидкість збору інтернет-замовлень, хв'),
     confirmed: cols.indexOf('Підтвердження'),
+    hireDate: cols.indexOf('Дата прийому'),
   };
   const rows = [];
   for (let i = headerIdx + 1; i < sheetRows.length; i++) {
@@ -687,6 +694,7 @@ function extractCategoryReportRows(sheetRows) {
       unaccountedFlag: String(row[idx.unaccountedFlag] || '').trim(),
       pickupSpeedRaw: String(row[idx.pickupSpeedRaw] || '').trim(),
       confirmed: String(row[idx.confirmed] || '').trim(),
+      hireDate: formatIsoDate(parseAepDate(row[idx.hireDate])),
     });
   }
   return { position, periodLabel, rows };
@@ -4199,6 +4207,7 @@ function renderCategoryAnalysisKpis(summary) {
     { label: 'Категорія 1', value: `${fmtNum(summary.category1)} (${fmtPct(cat1Pct)})`, accent: 'green' },
     { label: 'Категорія 2', value: `${fmtNum(summary.category2)} (${fmtPct(cat2Pct)})`, accent: 'red' },
     { label: 'Середній бал тестів', value: fmtPct(summary.avgTests), accent: '' },
+    { label: 'Новачки цього кварталу', value: `${fmtNum(summary.newcomers)} (${fmtPct(summary.newcomersPct)})`, accent: 'yellow' },
   ];
   document.getElementById('ca-kpi-grid').innerHTML = tiles.map((tl) => `
     <div class="kpi-tile ${tl.accent ? `accent-${tl.accent}` : ''}">
@@ -4296,9 +4305,12 @@ function renderCategoryAnalysisPeopleTable() {
         ? '<span class="badge status-good">Так</span>'
         : (p.rkWish ? '<span class="badge status-orange">Ні</span>' : '—');
       const changed = p.effectiveCategory !== p.potentialCategory;
+      const newcomerBadge = p.isNewcomer
+        ? ` <span class="badge status-yellow" title="${p.hireDate ? `Прийнятий ${escapeHtml(p.hireDate)}` : 'Новачок цього кварталу'}">новачок</span>`
+        : '';
       return `
       <tr>
-        <td>${escapeHtml(p.name)}</td>
+        <td>${escapeHtml(p.name)}${newcomerBadge}</td>
         <td>${escapeHtml(p.region)}</td>
         <td>${escapeHtml(p.store)}</td>
         <td>${fmtNum(p.potentialCategory)}</td>

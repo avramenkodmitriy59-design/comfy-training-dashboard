@@ -746,4 +746,5 @@ def clean_category_report_row(raw):
         "unaccountedFlag": str(raw.get("unaccountedFlag") or "").strip(),
         "pickupSpeedMin": parse_pickup_speed(raw.get("pickupSpeedRaw")),
         "confirmed": str(raw.get("confirmed") or "").strip(),
+        "hireDate": str(raw.get("hireDate") or "").strip() or None,
     }

@@ -190,7 +190,8 @@ CREATE TABLE IF NOT EXISTS category_report_details (
     returns_flag TEXT,
     unaccounted_flag TEXT,
     pickup_speed_min REAL,
-    confirmed TEXT
+    confirmed TEXT,
+    hire_date TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_category_report_details_report ON category_report_details(category_report_id);
 
@@ -256,6 +257,10 @@ def init_db():
     for col, coltype in (("period_year", "INTEGER"), ("period_quarter", "INTEGER"), ("aep_goal", "INTEGER")):
         if col not in cols:
             conn.execute(f"ALTER TABLE periods ADD COLUMN {col} {coltype}")
+    # migration for DBs created before category_report_details.hire_date existed
+    cat_detail_cols = [r["name"] for r in conn.execute("PRAGMA table_info(category_report_details)").fetchall()]
+    if cat_detail_cols and "hire_date" not in cat_detail_cols:
+        conn.execute("ALTER TABLE category_report_details ADD COLUMN hire_date TEXT")
     for position, segment, first_line in DEFAULT_POSITIONS:
         conn.execute(
             "INSERT OR IGNORE INTO positions_config (position, segment, first_line, needs_classification) "

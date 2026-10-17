@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import secrets
 import hmac
 import datetime
@@ -1610,12 +1611,13 @@ def upload_category_report():
             conn.execute(
                 "INSERT INTO category_report_details (category_report_id, region, store, store_category, "
                 "complexity_level, name, login, prev_category, potential_category, rk_wish, rk_comment, "
-                "tests, open_questions, process_errors, returns_flag, unaccounted_flag, pickup_speed_min, confirmed) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "tests, open_questions, process_errors, returns_flag, unaccounted_flag, pickup_speed_min, confirmed, "
+                "hire_date) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (category_report_id, r["region"], r["store"], r["storeCategory"], r["complexityLevel"],
                  r["name"], r["login"], r["prevCategory"], r["potentialCategory"], r["rkWish"], r["rkComment"],
                  r["tests"], r["openQuestions"], r["processErrors"], r["returnsFlag"], r["unaccountedFlag"],
-                 r["pickupSpeedMin"], r["confirmed"]),
+                 r["pickupSpeedMin"], r["confirmed"], r["hireDate"]),
             )
         conn.commit()
     except Exception:
@@ -1674,6 +1676,34 @@ def _tests_value(row):
     return row["tests"] if row["tests"] is not None else 0.0
 
 
+_PERIOD_LABEL_RE = re.compile(r"(\d+)\s*квартал\s*(\d{4})", re.IGNORECASE)
+
+
+def _quarter_bounds(year, quarter):
+    """[start, end) calendar-date bounds for a "N квартал YYYY" period,
+    as ISO date strings — hire_date is stored the same way, so a plain
+    string comparison works."""
+    start_month = (quarter - 1) * 3 + 1
+    start = datetime.date(year, start_month, 1)
+    end = datetime.date(year + 1, 1, 1) if start_month == 10 else datetime.date(year, start_month + 3, 1)
+    return start.isoformat(), end.isoformat()
+
+
+def _is_newcomer(row, period_label):
+    """Hired during the same quarter this report covers — parsed from the
+    report's own "N квартал YYYY" label, not today's date, so past
+    quarters' reports keep reporting the newcomer count that was true
+    for THAT quarter."""
+    if not row["hire_date"]:
+        return False
+    m = _PERIOD_LABEL_RE.search(period_label or "")
+    if not m:
+        return False
+    quarter, year = int(m.group(1)), int(m.group(2))
+    start, end = _quarter_bounds(year, quarter)
+    return start <= row["hire_date"] < end
+
+
 def _effective_category(row, with_approvals):
     """The category that actually counts — the raw calculated one, unless
     "з погодженнями" is on AND the RC's wish for this person was
@@ -1720,16 +1750,21 @@ def category_report_summary():
     with_approvals = request.args.get("withApprovals") == "1"
     where, params = _category_report_where(request.args)
     conn = db.get_db()
+    report = conn.execute("SELECT period_label FROM category_reports WHERE id=?", (category_report_id,)).fetchone()
     rows = conn.execute(f"SELECT * FROM category_report_details WHERE {where}", params).fetchall()
     conn.close()
     cat1 = sum(1 for r in rows if _effective_category(r, with_approvals) == 1)
     cat2 = sum(1 for r in rows if _effective_category(r, with_approvals) == 2)
     tests = [_tests_value(r) for r in rows]
+    period_label = report["period_label"] if report else ""
+    newcomers = sum(1 for r in rows if _is_newcomer(r, period_label))
     return jsonify({
         "total": len(rows),
         "avgTests": round(sum(tests) / len(tests), 1) if tests else None,
         "category1": cat1,
         "category2": cat2,
+        "newcomers": newcomers,
+        "newcomersPct": round(newcomers / len(rows) * 100, 1) if rows else None,
     })
 
 
@@ -1868,8 +1903,9 @@ def category_report_people():
     with_approvals = request.args.get("withApprovals") == "1"
     where, params = _category_report_where(request.args)
     conn = db.get_db()
-    report = conn.execute("SELECT position FROM category_reports WHERE id=?", (category_report_id,)).fetchone()
+    report = conn.execute("SELECT position, period_label FROM category_reports WHERE id=?", (category_report_id,)).fetchone()
     criteria = _get_criteria(conn, report["position"]) if report else None
+    period_label = report["period_label"] if report else ""
     rows = conn.execute(
         f"SELECT * FROM category_report_details WHERE {where} ORDER BY potential_category DESC, tests ASC",
         params,
@@ -1884,6 +1920,7 @@ def category_report_people():
         "returnsFlag": r["returns_flag"], "unaccountedFlag": r["unaccounted_flag"],
         "pickupSpeedMin": r["pickup_speed_min"], "confirmed": r["confirmed"],
         "failedCriteria": _failed_criteria(r, criteria),
+        "hireDate": r["hire_date"], "isNewcomer": _is_newcomer(r, period_label),
     } for r in rows]})
 
 
