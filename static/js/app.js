@@ -672,10 +672,24 @@ function extractCategoryReportRows(sheetRows) {
     confirmed: cols.indexOf('Підтвердження'),
     hireDate: cols.indexOf('Дата прийому'),
   };
+  // Everything except identity/context columns is a potential criteria
+  // metric — captured generically by its exact header text so a
+  // position-specific column (e.g. a merchandiser's "% утримання
+  // обороту") works without any code change, not just the handful of
+  // columns the storekeeper file happens to share.
+  const identityCols = new Set([
+    'Регіон', 'Магазин', 'Кат-я м-на (Front/Back)', 'Рівень складності складу',
+    'ПІБ', 'Логін', 'Попередня кат.', 'Потенц. кат.', 'Побажання РК', 'Коментар РК',
+    'Відкриті питання', 'Підтвердження', 'Дата прийому',
+  ]);
+  const metricCols = cols.map((c, i) => ({ name: c, i })).filter((c) => c.name && !identityCols.has(c.name));
+
   const rows = [];
   for (let i = headerIdx + 1; i < sheetRows.length; i++) {
     const row = sheetRows[i];
     if (!row || !row[idx.name]) continue;
+    const metrics = {};
+    metricCols.forEach((c) => { metrics[c.name] = row[c.i]; });
     rows.push({
       region: String(row[idx.region] || '').trim(),
       store: String(row[idx.store] || '').trim(),
@@ -695,6 +709,7 @@ function extractCategoryReportRows(sheetRows) {
       pickupSpeedRaw: String(row[idx.pickupSpeedRaw] || '').trim(),
       confirmed: String(row[idx.confirmed] || '').trim(),
       hireDate: formatIsoDate(parseAepDate(row[idx.hireDate])),
+      metrics,
     });
   }
   return { position, periodLabel, rows };
@@ -4112,6 +4127,36 @@ function renderCategoryBottlenecksCard(regions, selectedRegion) {
   `;
 }
 
+const RULE_OP_LABELS = {
+  '>=': 'не менше',
+  '<=': 'не більше',
+  '>': 'більше',
+  '<': 'менше',
+  '==': 'дорівнює',
+  flagAbsent: 'немає позначки',
+  flagPresent: 'є позначка',
+};
+
+function ruleOpText(r) {
+  const label = RULE_OP_LABELS[r.op] || r.op;
+  return (r.op === 'flagAbsent' || r.op === 'flagPresent') ? label : `${label} ${fmtNum(r.value)}`;
+}
+
+function renderRulesTableRows(rules) {
+  const out = [];
+  (rules || []).forEach((entry) => {
+    if (entry.or) {
+      entry.or.forEach((r, j) => {
+        if (j > 0) out.push('<tr><td colspan="2" class="muted" style="text-align:center;">ЧИ</td></tr>');
+        out.push(`<tr><td>${escapeHtml(r.label || r.metric)}</td><td>${ruleOpText(r)}</td></tr>`);
+      });
+    } else {
+      out.push(`<tr><td>${escapeHtml(entry.label || entry.metric)}</td><td>${ruleOpText(entry)}</td></tr>`);
+    }
+  });
+  return out.join('');
+}
+
 function renderCategoryCriteriaCard(position, criteria) {
   const card = document.getElementById('ca-criteria-card');
   if (!criteria) {
@@ -4121,44 +4166,52 @@ function renderCategoryCriteriaCard(position, criteria) {
       <button class="btn btn-secondary btn-sm" id="ca-edit-criteria">Додати критерії</button>
     `;
   } else {
+    const rulesRows = renderRulesTableRows(criteria.rules);
     card.innerHTML = `
       <h3>Умови категоризації — ${escapeHtml(position)} <button class="btn btn-secondary btn-sm" id="ca-edit-criteria" style="margin-left:10px;">Редагувати</button></h3>
       <p style="white-space:pre-wrap; margin:0;">${escapeHtml(criteria.criteriaText)}</p>
+      ${rulesRows ? `<div class="table-scroll"><table class="data-table" style="margin-top:12px;"><thead><tr><th>Критерій</th><th>Умова</th></tr></thead><tbody>${rulesRows}</tbody></table></div>` : ''}
     `;
   }
   document.getElementById('ca-edit-criteria').onclick = () => openCategoryCriteriaModal(position, criteria);
 }
 
-function openCategoryCriteriaModal(position, criteria) {
+async function openCategoryCriteriaModal(position, criteria) {
   const root = document.getElementById('modal-root');
-  const c = criteria || { criteriaText: '', testsMin: '', processErrorsMax: '', pickupSpeedMaxMin: '', returnsPenalty: false, unaccountedPenalty: false };
+  const c = criteria || { criteriaText: '', rules: [] };
+  // Flatten saved {or:[...]} groups into a linear row list for the editor —
+  // each row after the first in a group is marked rel:'OR', everything
+  // else rel:'AND'; re-grouped back on save.
+  const workingRules = [];
+  (c.rules || []).forEach((entry) => {
+    if (entry.or) {
+      entry.or.forEach((r, j) => workingRules.push({ ...r, rel: j === 0 ? 'AND' : 'OR' }));
+    } else {
+      workingRules.push({ ...entry, rel: 'AND' });
+    }
+  });
+
+  let metricOptions = [];
+  try {
+    const resp = await api(`/api/category-report-metrics?${qs({ categoryReportId: state.categoryAnalysis.categoryReportId })}`);
+    metricOptions = resp.metrics || [];
+  } catch (e) { /* non-fatal — metric name still works as free text */ }
+
   root.innerHTML = `
     <div class="modal-backdrop" id="ca-criteria-backdrop">
-      <div class="modal">
+      <div class="modal" style="max-width:800px;">
         <button class="modal-close" id="ca-criteria-close">✕</button>
         <h2>Умови категоризації — ${escapeHtml(position)}</h2>
-        <p class="modal-subtitle">Текстовий опис показується як підказка на екрані. Числові пороги (не обов'язково всі) живлять автоматичний пошук "проблемних зон" по регіонах — категорія 1 присвоюється, лише якщо виконані всі задані умови.</p>
+        <p class="modal-subtitle">Текстовий опис показується як підказка на екрані. Умови нижче (не обов'язково всі) живлять автоматичний пошук "проблемних зон": категорія 1 потребує виконання УСІХ умов, а позначені "ЧИ" — альтернативи одна одній (досить виконати одну).</p>
         <div class="field-group">
           <label>Опис умов (підказка на екрані)</label>
-          <textarea id="ca-c-text" rows="6" style="width:100%; padding:10px 12px; border:1px solid var(--color-border); border-radius:var(--radius-sm); font-family:inherit;">${escapeHtml(c.criteriaText)}</textarea>
+          <textarea id="ca-c-text" rows="5" style="width:100%; padding:10px 12px; border:1px solid var(--color-border); border-radius:var(--radius-sm); font-family:inherit;">${escapeHtml(c.criteriaText)}</textarea>
         </div>
         <div class="field-group">
-          <label>Тести (+ відкриті питання), мінімум %</label>
-          <input type="number" id="ca-c-tests" value="${c.testsMin ?? ''}" placeholder="напр. 90">
-        </div>
-        <div class="field-group">
-          <label>Помилки в процесах, максимум</label>
-          <input type="number" id="ca-c-errors" value="${c.processErrorsMax ?? ''}" placeholder="напр. 3">
-        </div>
-        <div class="field-group">
-          <label>Швидкість збору інтернет-замовлень, максимум хв</label>
-          <input type="number" id="ca-c-speed" value="${c.pickupSpeedMaxMin ?? ''}" placeholder="напр. 10">
-        </div>
-        <div class="field-group">
-          <label class="inline"><input type="checkbox" id="ca-c-returns" ${c.returnsPenalty ? 'checked' : ''}> Наявність повернень на РЦ знижує категорію</label>
-        </div>
-        <div class="field-group">
-          <label class="inline"><input type="checkbox" id="ca-c-unaccounted" ${c.unaccountedPenalty ? 'checked' : ''}> Наявність неоприбуткованого товару знижує категорію</label>
+          <label>Умови для автоматичного аналізу причин</label>
+          <datalist id="ca-metric-options">${metricOptions.map((m) => `<option value="${escapeHtml(m)}">`).join('')}</datalist>
+          <div id="ca-rules-rows"></div>
+          <button type="button" class="btn btn-secondary btn-sm" id="ca-rule-add" style="margin-top:8px;">+ Додати умову</button>
         </div>
         <div id="ca-criteria-error" class="error-text"></div>
         <div class="modal-actions">
@@ -4168,6 +4221,52 @@ function openCategoryCriteriaModal(position, criteria) {
       </div>
     </div>
   `;
+
+  function renderRows() {
+    const container = document.getElementById('ca-rules-rows');
+    container.innerHTML = workingRules.map((r, i) => `
+      <div class="rule-row" data-idx="${i}" style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+        ${i === 0 ? '<span style="width:52px; flex-shrink:0;"></span>' : `
+          <select class="rule-rel" style="width:70px; flex-shrink:0;">
+            <option value="AND" ${r.rel === 'AND' ? 'selected' : ''}>І</option>
+            <option value="OR" ${r.rel === 'OR' ? 'selected' : ''}>ЧИ</option>
+          </select>`}
+        <input class="rule-label" placeholder="Назва (підпис)" value="${escapeHtml(r.label || '')}" style="flex:1; min-width:120px;">
+        <input class="rule-metric" list="ca-metric-options" placeholder="Колонка у файлі" value="${escapeHtml(r.metric || '')}" style="flex:1; min-width:120px;">
+        <select class="rule-op" style="width:150px; flex-shrink:0;">
+          ${Object.entries(RULE_OP_LABELS).map(([op, lbl]) => `<option value="${op}" ${r.op === op ? 'selected' : ''}>${lbl}</option>`).join('')}
+        </select>
+        <input class="rule-value" type="number" value="${r.value ?? ''}" placeholder="значення" style="width:90px; flex-shrink:0; ${r.op === 'flagAbsent' || r.op === 'flagPresent' ? 'visibility:hidden;' : ''}">
+        <button type="button" class="btn btn-secondary btn-sm rule-remove" style="flex-shrink:0;">✕</button>
+      </div>
+    `).join('') || '<p class="muted" style="margin-top:8px;">Умов ще немає.</p>';
+
+    container.querySelectorAll('.rule-row').forEach((rowEl) => {
+      const i = Number(rowEl.dataset.idx);
+      const relSel = rowEl.querySelector('.rule-rel');
+      if (relSel) relSel.addEventListener('change', (e) => { workingRules[i].rel = e.target.value; });
+      rowEl.querySelector('.rule-label').addEventListener('input', (e) => { workingRules[i].label = e.target.value; });
+      rowEl.querySelector('.rule-metric').addEventListener('input', (e) => { workingRules[i].metric = e.target.value; });
+      const valueInput = rowEl.querySelector('.rule-value');
+      rowEl.querySelector('.rule-op').addEventListener('change', (e) => {
+        workingRules[i].op = e.target.value;
+        valueInput.style.visibility = (e.target.value === 'flagAbsent' || e.target.value === 'flagPresent') ? 'hidden' : 'visible';
+      });
+      valueInput.addEventListener('input', (e) => { workingRules[i].value = e.target.value; });
+      rowEl.querySelector('.rule-remove').addEventListener('click', () => {
+        workingRules.splice(i, 1);
+        if (workingRules.length && workingRules[0].rel === 'OR') workingRules[0].rel = 'AND';
+        renderRows();
+      });
+    });
+  }
+  renderRows();
+
+  document.getElementById('ca-rule-add').onclick = () => {
+    workingRules.push({ label: '', metric: '', op: '>=', value: '', rel: 'AND' });
+    renderRows();
+  };
+
   document.getElementById('ca-criteria-close').onclick = closeModal;
   document.getElementById('ca-criteria-cancel').onclick = closeModal;
   document.getElementById('ca-criteria-backdrop').addEventListener('click', (e) => {
@@ -4177,16 +4276,26 @@ function openCategoryCriteriaModal(position, criteria) {
     const btn = document.getElementById('ca-criteria-save');
     btn.disabled = true;
     try {
+      // Re-group the linear row list back into {or:[...]} groups using the rel markers.
+      const rules = [];
+      workingRules.forEach((r) => {
+        if (!r.metric || !r.op) return;
+        const cleaned = { metric: r.metric.trim(), op: r.op, label: (r.label || '').trim() || r.metric.trim() };
+        if (r.op !== 'flagAbsent' && r.op !== 'flagPresent') cleaned.value = Number(r.value);
+        if (r.rel === 'OR' && rules.length) {
+          const last = rules[rules.length - 1];
+          if (last.or) last.or.push(cleaned);
+          else rules[rules.length - 1] = { or: [last, cleaned] };
+        } else {
+          rules.push(cleaned);
+        }
+      });
       await api('/api/category-criteria', {
         method: 'POST',
         body: JSON.stringify({
           position,
           criteriaText: document.getElementById('ca-c-text').value,
-          testsMin: document.getElementById('ca-c-tests').value,
-          processErrorsMax: document.getElementById('ca-c-errors').value,
-          pickupSpeedMaxMin: document.getElementById('ca-c-speed').value,
-          returnsPenalty: document.getElementById('ca-c-returns').checked,
-          unaccountedPenalty: document.getElementById('ca-c-unaccounted').checked,
+          rules,
         }),
       });
       closeModal();

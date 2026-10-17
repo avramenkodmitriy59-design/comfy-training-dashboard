@@ -1612,12 +1612,12 @@ def upload_category_report():
                 "INSERT INTO category_report_details (category_report_id, region, store, store_category, "
                 "complexity_level, name, login, prev_category, potential_category, rk_wish, rk_comment, "
                 "tests, open_questions, process_errors, returns_flag, unaccounted_flag, pickup_speed_min, confirmed, "
-                "hire_date) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "hire_date, metrics_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (category_report_id, r["region"], r["store"], r["storeCategory"], r["complexityLevel"],
                  r["name"], r["login"], r["prevCategory"], r["potentialCategory"], r["rkWish"], r["rkComment"],
                  r["tests"], r["openQuestions"], r["processErrors"], r["returnsFlag"], r["unaccountedFlag"],
-                 r["pickupSpeedMin"], r["confirmed"], r["hireDate"]),
+                 r["pickupSpeedMin"], r["confirmed"], r["hireDate"], json.dumps(r["metrics"], ensure_ascii=False)),
             )
         conn.commit()
     except Exception:
@@ -1719,26 +1719,76 @@ def _effective_category(row, with_approvals):
     return row["potential_category"]
 
 
+_RULE_OPS = {
+    ">=": lambda v, t: v >= t, "<=": lambda v, t: v <= t,
+    ">": lambda v, t: v > t, "<": lambda v, t: v < t, "==": lambda v, t: v == t,
+}
+
+
+def _rule_passes(rule, metrics, tests_value):
+    """A single requirement against one person's data. "Тести" is the
+    one metric every position shares (a fixed column); everything else
+    is looked up by its exact column header in that row's metrics_json,
+    so the same engine works for any position's differently-shaped file.
+    Missing/unparseable data fails a numeric rule rather than passing it
+    by default — consistent with treating a blank test as 0%, not as
+    "can't tell so let it through"."""
+    metric_key = rule.get("metric", "")
+    if metric_key == "Тести":
+        m = {"raw": "" if tests_value is None else str(tests_value), "value": tests_value}
+    else:
+        m = metrics.get(metric_key) or {"raw": "", "value": None}
+    op = rule.get("op")
+    if op in ("flagAbsent", "flagPresent"):
+        # A numeric cell (e.g. an error COUNT) is "present" when nonzero,
+        # not merely non-blank — "0" is a real zero, not a mark. A
+        # non-numeric cell (e.g. "Так"/blank) is "present" when non-blank.
+        present = (m.get("value") != 0) if m.get("value") is not None else bool(m.get("raw"))
+        return (not present) if op == "flagAbsent" else present
+    val = m.get("value")
+    if val is None:
+        return False
+    fn = _RULE_OPS.get(op)
+    if not fn:
+        return True
+    try:
+        return fn(val, float(rule.get("value")))
+    except (TypeError, ValueError):
+        return True
+
+
+def _rule_label(rule):
+    return rule.get("label") or rule.get("metric") or ""
+
+
 def _failed_criteria(row, criteria):
-    """Which of the position's category-1 conditions this person's raw
-    values fail — only checks conditions the position actually has a
-    threshold configured for, so an unconfigured position just reports
-    no reasons rather than guessing at thresholds nobody entered."""
-    if not criteria:
+    """Which of the position's category-1 requirements this person's raw
+    values fail — only positions with rules configured report anything,
+    so an unconfigured position just shows no reasons rather than
+    guessing. Each top-level entry in rules_json is either one required
+    rule, or an {"or": [...]} group that passes if any member does —
+    matching the source files' own "ЧИ" alternative conditions."""
+    if not criteria or not criteria["rules_json"]:
         return []
+    try:
+        rules = json.loads(criteria["rules_json"])
+    except (TypeError, ValueError):
+        return []
+    metrics = {}
+    if row["metrics_json"]:
+        try:
+            metrics = json.loads(row["metrics_json"])
+        except (TypeError, ValueError):
+            metrics = {}
+    tests_value = _tests_value(row)
     failed = []
-    if criteria["tests_min"] is not None and _tests_value(row) < criteria["tests_min"]:
-        failed.append("Тести")
-    if (criteria["process_errors_max"] is not None and row["process_errors"] is not None
-            and row["process_errors"] > criteria["process_errors_max"]):
-        failed.append("Помилки в процесах")
-    if (criteria["pickup_speed_max_min"] is not None and row["pickup_speed_min"] is not None
-            and row["pickup_speed_min"] > criteria["pickup_speed_max_min"]):
-        failed.append("Швидкість збору інтернет-замовлень")
-    if criteria["returns_penalty"] and row["returns_flag"]:
-        failed.append("Повернення на РЦ")
-    if criteria["unaccounted_penalty"] and row["unaccounted_flag"]:
-        failed.append("Неоприбуткований товар")
+    for entry in rules:
+        if isinstance(entry, dict) and "or" in entry:
+            group = entry["or"]
+            if not any(_rule_passes(r, metrics, tests_value) for r in group):
+                failed.append(" ЧИ ".join(_rule_label(r) for r in group))
+        elif not _rule_passes(entry, metrics, tests_value):
+            failed.append(_rule_label(entry))
     return failed
 
 
@@ -1934,14 +1984,47 @@ def get_category_criteria():
     conn.close()
     if not row:
         return jsonify({"criteria": None})
-    return jsonify({"criteria": {
-        "criteriaText": row["criteria_text"],
-        "testsMin": row["tests_min"],
-        "processErrorsMax": row["process_errors_max"],
-        "pickupSpeedMaxMin": row["pickup_speed_max_min"],
-        "returnsPenalty": bool(row["returns_penalty"]),
-        "unaccountedPenalty": bool(row["unaccounted_penalty"]),
-    }})
+    try:
+        rules = json.loads(row["rules_json"]) if row["rules_json"] else []
+    except (TypeError, ValueError):
+        rules = []
+    return jsonify({"criteria": {"criteriaText": row["criteria_text"], "rules": rules}})
+
+
+_RULE_OP_SET = {">=", "<=", ">", "<", "==", "flagAbsent", "flagPresent"}
+
+
+def _clean_rule(r):
+    if not isinstance(r, dict):
+        return None
+    metric = str(r.get("metric", "")).strip()
+    op = r.get("op")
+    if not metric or op not in _RULE_OP_SET:
+        return None
+    cleaned = {"metric": metric, "op": op, "label": str(r.get("label", "")).strip() or metric}
+    if op not in ("flagAbsent", "flagPresent"):
+        try:
+            cleaned["value"] = float(r.get("value"))
+        except (TypeError, ValueError):
+            return None
+    return cleaned
+
+
+def _clean_rules(rules):
+    """Validate/normalize a rules_json payload — drops anything malformed
+    rather than rejecting the whole save, so one bad row in a big list
+    doesn't block saving the rest."""
+    cleaned = []
+    for entry in (rules or []):
+        if isinstance(entry, dict) and "or" in entry:
+            group = [g for g in (_clean_rule(r) for r in (entry.get("or") or [])) if g]
+            if len(group) >= 2:
+                cleaned.append({"or": group})
+        else:
+            r = _clean_rule(entry)
+            if r:
+                cleaned.append(r)
+    return cleaned
 
 
 @app.post("/api/category-criteria")
@@ -1951,29 +2034,47 @@ def set_category_criteria():
     criteria_text = str(data.get("criteriaText", "")).strip()
     if not position:
         return jsonify({"error": "position обов'язковий"}), 400
-
-    def num(v):
-        try:
-            n = float(v)
-            return n if n == n else None
-        except (TypeError, ValueError):
-            return None
+    rules = _clean_rules(data.get("rules"))
 
     conn = db.get_db()
     conn.execute(
-        "INSERT INTO category_criteria (position, criteria_text, tests_min, process_errors_max, "
-        "pickup_speed_max_min, returns_penalty, unaccounted_penalty, updated_at) VALUES (?,?,?,?,?,?,?,?) "
-        "ON CONFLICT(position) DO UPDATE SET criteria_text=excluded.criteria_text, tests_min=excluded.tests_min, "
-        "process_errors_max=excluded.process_errors_max, pickup_speed_max_min=excluded.pickup_speed_max_min, "
-        "returns_penalty=excluded.returns_penalty, unaccounted_penalty=excluded.unaccounted_penalty, "
-        "updated_at=excluded.updated_at",
-        (position, criteria_text, num(data.get("testsMin")), num(data.get("processErrorsMax")),
-         num(data.get("pickupSpeedMaxMin")), 1 if data.get("returnsPenalty") else 0,
-         1 if data.get("unaccountedPenalty") else 0, datetime.datetime.utcnow().isoformat() + "Z"),
+        "INSERT INTO category_criteria (position, criteria_text, rules_json, updated_at) VALUES (?,?,?,?) "
+        "ON CONFLICT(position) DO UPDATE SET criteria_text=excluded.criteria_text, "
+        "rules_json=excluded.rules_json, updated_at=excluded.updated_at",
+        (position, criteria_text, json.dumps(rules, ensure_ascii=False), datetime.datetime.utcnow().isoformat() + "Z"),
     )
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
+
+
+@app.get("/api/category-report-metrics")
+def category_report_metrics():
+    """Every metric column name seen in this report's uploaded file,
+    beyond the handful of universal ones — feeds the criteria editor's
+    metric picker so you choose from what the file actually has instead
+    of retyping a column header exactly."""
+    category_report_id = request.args.get("categoryReportId")
+    if not category_report_id:
+        return jsonify({"error": "categoryReportId обов'язковий"}), 400
+    conn = db.get_db()
+    rows = conn.execute(
+        "SELECT metrics_json FROM category_report_details WHERE category_report_id=? AND metrics_json IS NOT NULL",
+        (category_report_id,),
+    ).fetchall()
+    conn.close()
+    keys = []
+    seen = {"Тести"}
+    for r in rows:
+        try:
+            metrics = json.loads(r["metrics_json"])
+        except (TypeError, ValueError):
+            continue
+        for k in metrics:
+            if k not in seen:
+                seen.add(k)
+                keys.append(k)
+    return jsonify({"metrics": ["Тести"] + keys})
 
 
 # ---------- periods / trend ----------

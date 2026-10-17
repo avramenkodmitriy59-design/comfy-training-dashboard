@@ -191,22 +191,24 @@ CREATE TABLE IF NOT EXISTS category_report_details (
     unaccounted_flag TEXT,
     pickup_speed_min REAL,
     confirmed TEXT,
-    hire_date TEXT
+    hire_date TEXT,
+    metrics_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_category_report_details_report ON category_report_details(category_report_id);
 
--- Structured thresholds are optional (nullable) alongside the free-text
--- description — pattern detection uses whichever ones are set for this
--- position and simply skips the rest, so a position can be added with
--- just the hint text before anyone's filled in the numeric side.
+-- Every position has its own criteria shape (different metrics entirely —
+-- a storekeeper's "pickup speed" has no equivalent for a merchandiser),
+-- so thresholds aren't fixed columns. rules_json holds an ordered list of
+-- requirements; each is either a single rule or an "ЧИ" (OR) group of
+-- rules, and ALL top-level entries must pass for category 1. A rule
+-- references a metric by the exact column header it came from in that
+-- position's uploaded file (category_report_details.metrics_json), so
+-- the same engine works for any position without code changes — only
+-- "Тести" is special-cased since it's a fixed, universal column.
 CREATE TABLE IF NOT EXISTS category_criteria (
     position TEXT PRIMARY KEY,
     criteria_text TEXT NOT NULL,
-    tests_min REAL,
-    process_errors_max REAL,
-    pickup_speed_max_min REAL,
-    returns_penalty INTEGER NOT NULL DEFAULT 0,
-    unaccounted_penalty INTEGER NOT NULL DEFAULT 0,
+    rules_json TEXT,
     updated_at TEXT NOT NULL
 );
 """
@@ -257,10 +259,17 @@ def init_db():
     for col, coltype in (("period_year", "INTEGER"), ("period_quarter", "INTEGER"), ("aep_goal", "INTEGER")):
         if col not in cols:
             conn.execute(f"ALTER TABLE periods ADD COLUMN {col} {coltype}")
-    # migration for DBs created before category_report_details.hire_date existed
+    # migration for DBs created before category_report_details.hire_date/metrics_json existed
     cat_detail_cols = [r["name"] for r in conn.execute("PRAGMA table_info(category_report_details)").fetchall()]
     if cat_detail_cols and "hire_date" not in cat_detail_cols:
         conn.execute("ALTER TABLE category_report_details ADD COLUMN hire_date TEXT")
+    if cat_detail_cols and "metrics_json" not in cat_detail_cols:
+        conn.execute("ALTER TABLE category_report_details ADD COLUMN metrics_json TEXT")
+    # migration for DBs created before category_criteria switched from fixed
+    # threshold columns to a flexible rules_json (per-position rule list)
+    crit_cols = [r["name"] for r in conn.execute("PRAGMA table_info(category_criteria)").fetchall()]
+    if crit_cols and "rules_json" not in crit_cols:
+        conn.execute("ALTER TABLE category_criteria ADD COLUMN rules_json TEXT")
     for position, segment, first_line in DEFAULT_POSITIONS:
         conn.execute(
             "INSERT OR IGNORE INTO positions_config (position, segment, first_line, needs_classification) "

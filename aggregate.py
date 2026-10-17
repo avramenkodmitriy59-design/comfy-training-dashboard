@@ -717,6 +717,28 @@ def parse_pickup_speed(v):
     return round(minutes + seconds / 60, 2)
 
 
+def clean_metric_value(raw):
+    """A generic per-position metric cell (anything beyond the handful of
+    universal columns) — tries to parse a number so criteria rules can
+    compare it against a threshold (plain numbers, "93%", and "MM:SS"
+    durations like pickup speed all parse), while keeping the original
+    text so a rule can also just check whether a flag-type column (e.g.
+    "Повернення на РЦ") has anything in it at all."""
+    raw_str = str(raw if raw is not None else "").strip()
+    if not raw_str:
+        return {"raw": "", "value": None}
+    duration = parse_pickup_speed(raw_str)
+    if duration is not None:
+        return {"raw": raw_str, "value": duration}
+    try:
+        n = float(raw_str.rstrip("%").replace(",", ".").strip())
+        if n == n:
+            return {"raw": raw_str, "value": n}
+    except (TypeError, ValueError):
+        pass
+    return {"raw": raw_str, "value": None}
+
+
 def clean_category_report_row(raw):
     """"Аналіз категорій" — one row per person for one position's
     quarterly attestation/categorization file. prev/potential category
@@ -747,4 +769,5 @@ def clean_category_report_row(raw):
         "pickupSpeedMin": parse_pickup_speed(raw.get("pickupSpeedRaw")),
         "confirmed": str(raw.get("confirmed") or "").strip(),
         "hireDate": str(raw.get("hireDate") or "").strip() or None,
+        "metrics": {k: clean_metric_value(v) for k, v in (raw.get("metrics") or {}).items()},
     }
