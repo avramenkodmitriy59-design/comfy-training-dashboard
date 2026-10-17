@@ -48,7 +48,7 @@ const state = {
   loading: false,
   directorReport: { year: null, quarter: null, region: '', store: '', periods: [] },
   lessonReport: { lessons: [], lessonReportId: null, region: '', store: '', position: '', search: '' },
-  categoryAnalysis: { reports: [], categoryReportId: null, region: '' },
+  categoryAnalysis: { reports: [], categoryReportId: null, region: '', withApprovals: false },
 };
 
 /* ===================== utils ===================== */
@@ -3995,7 +3995,7 @@ async function loadCategoryReports(selectId) {
 }
 
 function renderCategoryAnalysisContent() {
-  const { reports, categoryReportId } = state.categoryAnalysis;
+  const { reports, categoryReportId, withApprovals } = state.categoryAnalysis;
   const el = document.getElementById('ca-content-area');
   const sortedReports = [...reports].reverse();
   const mostRecentId = reports[reports.length - 1]?.id;
@@ -4011,12 +4011,19 @@ function renderCategoryAnalysisContent() {
         <label>Регіон</label>
         <select id="ca-region"><option value="">Уся мережа</option></select>
       </div>
+      <div class="filter-field" style="min-width:260px;">
+        <label>Категорія</label>
+        <select id="ca-approvals">
+          <option value="0" ${!withApprovals ? 'selected' : ''}>Розрахована (без погоджень РК)</option>
+          <option value="1" ${withApprovals ? 'selected' : ''}>Фінальна (з погодженими побажаннями РК)</option>
+        </select>
+      </div>
     </div>
     <div class="card" id="ca-criteria-card"></div>
     <div class="kpi-grid" id="ca-kpi-grid"></div>
     <div class="card">
       <h3>По регіонах</h3>
-      <p class="field-hint">Завжди всі регіони, незалежно від фільтра вище. "Проблемні зони" — за якою саме умовою найчастіше не вистачає до 1 категорії серед тих, хто її не отримав.</p>
+      <p class="field-hint">Завжди всі регіони, незалежно від фільтра вище. "Проблемні зони" — за якою саме умовою найчастіше не вистачає до 1 категорії серед тих, хто її не отримав за розрахунком (незалежно від погоджень).</p>
       <div class="table-scroll"><table class="data-table" id="ca-regions-table"></table></div>
     </div>
     <div class="card">
@@ -4036,16 +4043,21 @@ function renderCategoryAnalysisContent() {
     state.categoryAnalysis.region = e.target.value;
     await refreshCategoryAnalysisData();
   });
+  document.getElementById('ca-approvals').addEventListener('change', async (e) => {
+    state.categoryAnalysis.withApprovals = e.target.value === '1';
+    await refreshCategoryAnalysisData();
+  });
 }
 
 async function refreshCategoryAnalysisData() {
-  const { categoryReportId, region, reports } = state.categoryAnalysis;
+  const { categoryReportId, region, reports, withApprovals } = state.categoryAnalysis;
   const report = reports.find((r) => r.id === categoryReportId);
+  const approvalsParam = withApprovals ? '1' : '0';
   const [filters, summary, byRegion, people, criteriaResp] = await Promise.all([
     api(`/api/category-report-filters?${qs({ categoryReportId })}`),
-    api(`/api/category-report-summary?${qs({ categoryReportId, region })}`),
-    api(`/api/category-report-by-region?${qs({ categoryReportId })}`),
-    api(`/api/category-report-people?${qs({ categoryReportId, region })}`),
+    api(`/api/category-report-summary?${qs({ categoryReportId, region, withApprovals: approvalsParam })}`),
+    api(`/api/category-report-by-region?${qs({ categoryReportId, withApprovals: approvalsParam })}`),
+    api(`/api/category-report-people?${qs({ categoryReportId, region, withApprovals: approvalsParam })}`),
     api(`/api/category-criteria?${qs({ position: report.position })}`),
   ]);
   const regionSelect = document.getElementById('ca-region');
@@ -4187,17 +4199,25 @@ function renderCategoryAnalysisPeopleTable() {
   const table = document.getElementById('ca-people-table');
   const pageRows = pageSlice(key, rows);
   table.innerHTML = `
-    <thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Попередня</th><th>Потенційна</th><th>Тести</th><th>Чому не 1 категорія</th></tr></thead>
-    <tbody>${pageRows.map((p) => `
+    <thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Розрахована</th><th>Побажання РК</th><th>Погоджено</th><th>Фінальна</th><th>Тести</th><th>Чому не 1 категорія (розрахунок)</th></tr></thead>
+    <tbody>${pageRows.map((p) => {
+      const confirmedBadge = p.confirmed === 'Так'
+        ? '<span class="badge status-good">Так</span>'
+        : (p.rkWish ? '<span class="badge status-orange">Ні</span>' : '—');
+      const changed = p.effectiveCategory !== p.potentialCategory;
+      return `
       <tr>
         <td>${escapeHtml(p.name)}</td>
         <td>${escapeHtml(p.region)}</td>
         <td>${escapeHtml(p.store)}</td>
-        <td>${fmtNum(p.prevCategory)}</td>
         <td>${fmtNum(p.potentialCategory)}</td>
+        <td>${p.rkWish ? escapeHtml(p.rkWish) + (p.rkComment ? ` <span class="muted" title="${escapeHtml(p.rkComment)}">(коментар)</span>` : '') : '—'}</td>
+        <td>${confirmedBadge}</td>
+        <td>${changed ? `<strong>${fmtNum(p.effectiveCategory)}</strong>` : fmtNum(p.effectiveCategory)}</td>
         <td>${progressCellHtml(p.tests)}</td>
         <td>${p.failedCriteria.length ? p.failedCriteria.map((f) => `<span class="badge status-orange">${escapeHtml(f)}</span>`).join(' ') : '—'}</td>
-      </tr>`).join('') || `<tr><td colspan="7" class="muted">Немає даних за цим фільтром</td></tr>`}</tbody>
+      </tr>`;
+    }).join('') || `<tr><td colspan="9" class="muted">Немає даних за цим фільтром</td></tr>`}</tbody>
   `;
   const hint = document.getElementById('ca-count-hint');
   if (hint) hint.textContent = `Показано ${rows.length} співробітників.`;

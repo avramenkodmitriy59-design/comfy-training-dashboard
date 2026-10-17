@@ -1667,6 +1667,21 @@ def _get_criteria(conn, position):
     return conn.execute("SELECT * FROM category_criteria WHERE position=?", (position,)).fetchone()
 
 
+def _effective_category(row, with_approvals):
+    """The category that actually counts — the raw calculated one, unless
+    "з погодженнями" is on AND the RC's wish for this person was
+    confirmed, in which case their requested category wins. Reasons a
+    person failed category-1 conditions are reported separately and
+    always reflect the raw calculation, regardless of this toggle — an
+    approved exception doesn't change what was actually wrong."""
+    if with_approvals and row["confirmed"] == "Так" and row["rk_wish"]:
+        try:
+            return float(row["rk_wish"])
+        except (TypeError, ValueError):
+            pass
+    return row["potential_category"]
+
+
 def _failed_criteria(row, criteria):
     """Which of the position's category-1 conditions this person's raw
     values fail — only checks conditions the position actually has a
@@ -1695,21 +1710,19 @@ def category_report_summary():
     category_report_id = request.args.get("categoryReportId")
     if not category_report_id:
         return jsonify({"error": "categoryReportId обов'язковий"}), 400
+    with_approvals = request.args.get("withApprovals") == "1"
     where, params = _category_report_where(request.args)
     conn = db.get_db()
-    row = conn.execute(
-        f"SELECT COUNT(*) AS total, AVG(tests) AS avgTests, "
-        f"SUM(CASE WHEN potential_category = 1 THEN 1 ELSE 0 END) AS cat1, "
-        f"SUM(CASE WHEN potential_category = 2 THEN 1 ELSE 0 END) AS cat2 "
-        f"FROM category_report_details WHERE {where}",
-        params,
-    ).fetchone()
+    rows = conn.execute(f"SELECT * FROM category_report_details WHERE {where}", params).fetchall()
     conn.close()
+    cat1 = sum(1 for r in rows if _effective_category(r, with_approvals) == 1)
+    cat2 = sum(1 for r in rows if _effective_category(r, with_approvals) == 2)
+    tests = [r["tests"] for r in rows if r["tests"] is not None]
     return jsonify({
-        "total": row["total"],
-        "avgTests": round(row["avgTests"], 1) if row["avgTests"] is not None else None,
-        "category1": row["cat1"] or 0,
-        "category2": row["cat2"] or 0,
+        "total": len(rows),
+        "avgTests": round(sum(tests) / len(tests), 1) if tests else None,
+        "category1": cat1,
+        "category2": cat2,
     })
 
 
@@ -1723,6 +1736,7 @@ def category_report_by_region():
     category_report_id = request.args.get("categoryReportId")
     if not category_report_id:
         return jsonify({"error": "categoryReportId обов'язковий"}), 400
+    with_approvals = request.args.get("withApprovals") == "1"
     conn = db.get_db()
     report = conn.execute("SELECT position FROM category_reports WHERE id=?", (category_report_id,)).fetchone()
     if not report:
@@ -1742,13 +1756,16 @@ def category_report_by_region():
             "testsSum": 0.0, "testsCount": 0, "failReasons": {},
         })
         b["total"] += 1
-        if r["potential_category"] == 1:
+        effective = _effective_category(r, with_approvals)
+        if effective == 1:
             b["category1"] += 1
-        elif r["potential_category"] == 2:
+        elif effective == 2:
             b["category2"] += 1
         if r["tests"] is not None:
             b["testsSum"] += r["tests"]
             b["testsCount"] += 1
+        # Reasons always reflect the raw calculation, not the toggle — an
+        # approved exception doesn't change what actually failed.
         if r["potential_category"] == 2:
             for reason in _failed_criteria(r, criteria):
                 b["failReasons"][reason] = b["failReasons"].get(reason, 0) + 1
@@ -1772,6 +1789,7 @@ def category_report_people():
     category_report_id = request.args.get("categoryReportId")
     if not category_report_id:
         return jsonify({"error": "categoryReportId обов'язковий"}), 400
+    with_approvals = request.args.get("withApprovals") == "1"
     where, params = _category_report_where(request.args)
     conn = db.get_db()
     report = conn.execute("SELECT position FROM category_reports WHERE id=?", (category_report_id,)).fetchone()
@@ -1784,6 +1802,7 @@ def category_report_people():
     return jsonify({"people": [{
         "region": r["region"], "store": r["store"], "name": r["name"],
         "prevCategory": r["prev_category"], "potentialCategory": r["potential_category"],
+        "effectiveCategory": _effective_category(r, with_approvals),
         "rkWish": r["rk_wish"], "rkComment": r["rk_comment"],
         "tests": r["tests"], "processErrors": r["process_errors"],
         "returnsFlag": r["returns_flag"], "unaccountedFlag": r["unaccounted_flag"],
