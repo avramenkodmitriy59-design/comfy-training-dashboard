@@ -1667,6 +1667,13 @@ def _get_criteria(conn, position):
     return conn.execute("SELECT * FROM category_criteria WHERE position=?", (position,)).fetchone()
 
 
+def _tests_value(row):
+    """A blank test score means the person didn't take it, not that it
+    doesn't count — treated as 0%, same as if they'd scored it, rather
+    than excluded from averages and fail-reason checks."""
+    return row["tests"] if row["tests"] is not None else 0.0
+
+
 def _effective_category(row, with_approvals):
     """The category that actually counts — the raw calculated one, unless
     "з погодженнями" is on AND the RC's wish for this person was
@@ -1690,7 +1697,7 @@ def _failed_criteria(row, criteria):
     if not criteria:
         return []
     failed = []
-    if criteria["tests_min"] is not None and row["tests"] is not None and row["tests"] < criteria["tests_min"]:
+    if criteria["tests_min"] is not None and _tests_value(row) < criteria["tests_min"]:
         failed.append("Тести")
     if (criteria["process_errors_max"] is not None and row["process_errors"] is not None
             and row["process_errors"] > criteria["process_errors_max"]):
@@ -1717,7 +1724,7 @@ def category_report_summary():
     conn.close()
     cat1 = sum(1 for r in rows if _effective_category(r, with_approvals) == 1)
     cat2 = sum(1 for r in rows if _effective_category(r, with_approvals) == 2)
-    tests = [r["tests"] for r in rows if r["tests"] is not None]
+    tests = [_tests_value(r) for r in rows]
     return jsonify({
         "total": len(rows),
         "avgTests": round(sum(tests) / len(tests), 1) if tests else None,
@@ -1761,9 +1768,8 @@ def category_report_by_region():
             b["category1"] += 1
         elif effective == 2:
             b["category2"] += 1
-        if r["tests"] is not None:
-            b["testsSum"] += r["tests"]
-            b["testsCount"] += 1
+        b["testsSum"] += _tests_value(r)
+        b["testsCount"] += 1
         # Reasons always reflect the raw calculation, not the toggle — an
         # approved exception doesn't change what actually failed.
         if r["potential_category"] == 2:
@@ -1819,9 +1825,8 @@ def category_report_by_store():
             b["category1"] += 1
         elif effective == 2:
             b["category2"] += 1
-        if r["tests"] is not None:
-            b["testsSum"] += r["tests"]
-            b["testsCount"] += 1
+        b["testsSum"] += _tests_value(r)
+        b["testsCount"] += 1
         if r["process_errors"] is not None:
             b["errorsSum"] += r["process_errors"]
             b["errorsCount"] += 1
@@ -1875,7 +1880,7 @@ def category_report_people():
         "prevCategory": r["prev_category"], "potentialCategory": r["potential_category"],
         "effectiveCategory": _effective_category(r, with_approvals),
         "rkWish": r["rk_wish"], "rkComment": r["rk_comment"],
-        "tests": r["tests"], "processErrors": r["process_errors"],
+        "tests": _tests_value(r), "processErrors": r["process_errors"],
         "returnsFlag": r["returns_flag"], "unaccountedFlag": r["unaccounted_flag"],
         "pickupSpeedMin": r["pickup_speed_min"], "confirmed": r["confirmed"],
         "failedCriteria": _failed_criteria(r, criteria),
