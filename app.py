@@ -1795,6 +1795,8 @@ def category_report_by_store():
         return jsonify({"error": "categoryReportId і region обов'язкові"}), 400
     with_approvals = request.args.get("withApprovals") == "1"
     conn = db.get_db()
+    report = conn.execute("SELECT position FROM category_reports WHERE id=?", (category_report_id,)).fetchone()
+    criteria = _get_criteria(conn, report["position"]) if report else None
     rows = conn.execute(
         "SELECT * FROM category_report_details WHERE category_report_id=? AND region=? AND store != ''",
         (category_report_id, region),
@@ -1806,6 +1808,10 @@ def category_report_by_store():
         b = by_store.setdefault(r["store"], {
             "store": r["store"], "total": 0, "category1": 0, "category2": 0,
             "testsSum": 0.0, "testsCount": 0,
+            "errorsSum": 0.0, "errorsCount": 0,
+            "speedSum": 0.0, "speedCount": 0,
+            "returnsCount": 0, "unaccountedCount": 0,
+            "failReasons": {},
         })
         b["total"] += 1
         effective = _effective_category(r, with_approvals)
@@ -1816,15 +1822,37 @@ def category_report_by_store():
         if r["tests"] is not None:
             b["testsSum"] += r["tests"]
             b["testsCount"] += 1
+        if r["process_errors"] is not None:
+            b["errorsSum"] += r["process_errors"]
+            b["errorsCount"] += 1
+        if r["pickup_speed_min"] is not None:
+            b["speedSum"] += r["pickup_speed_min"]
+            b["speedCount"] += 1
+        if r["returns_flag"]:
+            b["returnsCount"] += 1
+        if r["unaccounted_flag"]:
+            b["unaccountedCount"] += 1
+        # Reasons always reflect the raw calculation, not the toggle — an
+        # approved exception doesn't change what actually failed.
+        if r["potential_category"] == 2:
+            for reason in _failed_criteria(r, criteria):
+                b["failReasons"][reason] = b["failReasons"].get(reason, 0) + 1
 
     stores = []
     for b in by_store.values():
         stores.append({
             "store": b["store"], "total": b["total"], "category1": b["category1"], "category2": b["category2"],
             "avgTests": round(b["testsSum"] / b["testsCount"], 1) if b["testsCount"] else None,
+            "avgProcessErrors": round(b["errorsSum"] / b["errorsCount"], 1) if b["errorsCount"] else None,
+            "avgPickupSpeed": round(b["speedSum"] / b["speedCount"], 1) if b["speedCount"] else None,
+            "returnsCount": b["returnsCount"], "unaccountedCount": b["unaccountedCount"],
+            "failReasons": sorted(
+                [{"reason": k, "count": v} for k, v in b["failReasons"].items()],
+                key=lambda x: -x["count"],
+            ),
         })
     stores.sort(key=lambda s: -(s["category2"] / s["total"] if s["total"] else 0))
-    return jsonify({"stores": stores})
+    return jsonify({"stores": stores, "hasCriteria": criteria is not None})
 
 
 @app.get("/api/category-report-people")

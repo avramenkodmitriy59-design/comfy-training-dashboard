@@ -4237,7 +4237,7 @@ async function openCategoryRegionStoresModal(region) {
   const root = document.getElementById('modal-root');
   root.innerHTML = `
     <div class="modal-backdrop" id="ca-stores-backdrop">
-      <div class="modal" style="max-width:680px;">
+      <div class="modal" style="max-width:1040px;">
         <button class="modal-close" id="ca-stores-close">✕</button>
         <h2>${escapeHtml(region.region)}</h2>
         <p class="modal-subtitle">Усього ${fmtNum(region.total)} · Категорія 1 — ${fmtPct(region.total ? Math.round((region.category1 / region.total) * 1000) / 10 : null)}</p>
@@ -4256,9 +4256,16 @@ async function openCategoryRegionStoresModal(region) {
   const table = document.getElementById('ca-stores-table');
   if (table) {
     table.innerHTML = `
-      <thead><tr><th>Магазин</th><th>Усього</th><th>Категорія 1</th><th>Категорія 2</th><th>Середній тест</th></tr></thead>
+      <thead><tr>
+        <th>Магазин</th><th>Усього</th><th>Категорія 1</th><th>Категорія 2</th><th>Середній тест</th>
+        <th>Сер. помилки в процесах</th><th>Сер. швидкість збору, хв</th><th>Повернення на РЦ</th><th>Неоприбуткований товар</th>
+        <th>Проблемні зони</th>
+      </tr></thead>
       <tbody>${stores.map((s) => {
         const cat1Pct = s.total ? Math.round((s.category1 / s.total) * 1000) / 10 : null;
+        const reasons = s.failReasons.length
+          ? s.failReasons.map((f) => `${escapeHtml(f.reason)} — ${f.count}`).join(', ')
+          : (s.category2 ? '<span class="muted">критерії не задані</span>' : '<span class="muted">—</span>');
         return `
         <tr>
           <td>${escapeHtml(s.store)}</td>
@@ -4266,8 +4273,13 @@ async function openCategoryRegionStoresModal(region) {
           <td>${progressCellHtml(cat1Pct)}</td>
           <td>${fmtNum(s.category2)}</td>
           <td>${progressCellHtml(s.avgTests)}</td>
+          <td>${s.avgProcessErrors === null ? '—' : fmtNum(s.avgProcessErrors)}</td>
+          <td>${s.avgPickupSpeed === null ? '—' : fmtNum(s.avgPickupSpeed)}</td>
+          <td>${fmtNum(s.returnsCount)}</td>
+          <td>${fmtNum(s.unaccountedCount)}</td>
+          <td>${reasons}</td>
         </tr>`;
-      }).join('') || `<tr><td colspan="5" class="muted">Немає даних</td></tr>`}</tbody>
+      }).join('') || `<tr><td colspan="10" class="muted">Немає даних</td></tr>`}</tbody>
     `;
   }
 }
