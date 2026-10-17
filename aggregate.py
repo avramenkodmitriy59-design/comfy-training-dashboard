@@ -699,3 +699,51 @@ def suggest_name_matches(unmatched, roster_rows, min_similarity=65.0, max_candid
             ],
         })
     return suggestions
+
+
+def parse_pickup_speed(v):
+    """"Швидкість збору інтернет-замовлень" is exported as MM:SS text
+    (e.g. "10:27") rather than a plain number — convert to minutes as a
+    float so it can be compared against a threshold. Returns None for
+    blank/unparseable cells (not 0 — 0 would read as "instant", which is
+    wrong for "not measured")."""
+    s = str(v or "").strip()
+    if not s:
+        return None
+    m = re.match(r"^(\d+):(\d+)$", s)
+    if not m:
+        return None
+    minutes, seconds = int(m.group(1)), int(m.group(2))
+    return round(minutes + seconds / 60, 2)
+
+
+def clean_category_report_row(raw):
+    """"Аналіз категорій" — one row per person for one position's
+    quarterly attestation/categorization file. prev/potential category
+    are numeric with 1 = the best (hardest-to-reach) category."""
+    def num(v):
+        try:
+            n = float(v)
+        except (TypeError, ValueError):
+            return None
+        return n if n == n else None
+
+    return {
+        "region": str(raw.get("region") or "").strip(),
+        "store": str(raw.get("store") or "").strip(),
+        "storeCategory": str(raw.get("storeCategory") or "").strip(),
+        "complexityLevel": num(raw.get("complexityLevel")),
+        "name": str(raw.get("name") or "").strip(),
+        "login": str(raw.get("login") or "").strip(),
+        "prevCategory": num(raw.get("prevCategory")),
+        "potentialCategory": num(raw.get("potentialCategory")),
+        "rkWish": str(raw.get("rkWish") or "").strip(),
+        "rkComment": str(raw.get("rkComment") or "").strip(),
+        "tests": num(raw.get("tests")),
+        "openQuestions": str(raw.get("openQuestions") or "").strip(),
+        "processErrors": num(raw.get("processErrors")),
+        "returnsFlag": str(raw.get("returnsFlag") or "").strip(),
+        "unaccountedFlag": str(raw.get("unaccountedFlag") or "").strip(),
+        "pickupSpeedMin": parse_pickup_speed(raw.get("pickupSpeedRaw")),
+        "confirmed": str(raw.get("confirmed") or "").strip(),
+    }

@@ -150,6 +150,64 @@ CREATE TABLE IF NOT EXISTS lesson_report_details (
     test_date TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_lesson_report_details_report ON lesson_report_details(lesson_report_id);
+
+-- "Аналіз категорій" — quarterly attestation/categorization reports, one
+-- upload per position (category_reports), keyed by (position, period)
+-- so re-uploading the same position+quarter replaces it (growing-file
+-- upsert, same shape as AEP/director report) while past quarters stay
+-- browsable. category_report_details holds one row per person with the
+-- raw attestation metrics the category is computed from (tests, process
+-- errors, returns, unaccounted goods, pickup speed) plus the RC's
+-- override request/comment — the same column set the source file uses,
+-- since every position's export follows this one standardized shape.
+-- category_criteria is a free-text per-position reference (what the
+-- category thresholds actually are) shown on screen as a hint, entered
+-- once per position and reused thereafter.
+CREATE TABLE IF NOT EXISTS category_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    position TEXT NOT NULL,
+    period_label TEXT NOT NULL,
+    uploaded_at TEXT NOT NULL,
+    UNIQUE(position, period_label)
+);
+
+CREATE TABLE IF NOT EXISTS category_report_details (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category_report_id INTEGER NOT NULL REFERENCES category_reports(id) ON DELETE CASCADE,
+    region TEXT,
+    store TEXT,
+    store_category TEXT,
+    complexity_level REAL,
+    name TEXT,
+    login TEXT,
+    prev_category REAL,
+    potential_category REAL,
+    rk_wish TEXT,
+    rk_comment TEXT,
+    tests REAL,
+    open_questions TEXT,
+    process_errors REAL,
+    returns_flag TEXT,
+    unaccounted_flag TEXT,
+    pickup_speed_min REAL,
+    confirmed TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_category_report_details_report ON category_report_details(category_report_id);
+
+-- Structured thresholds are optional (nullable) alongside the free-text
+-- description — pattern detection uses whichever ones are set for this
+-- position and simply skips the rest, so a position can be added with
+-- just the hint text before anyone's filled in the numeric side.
+CREATE TABLE IF NOT EXISTS category_criteria (
+    position TEXT PRIMARY KEY,
+    criteria_text TEXT NOT NULL,
+    tests_min REAL,
+    process_errors_max REAL,
+    pickup_speed_max_min REAL,
+    returns_penalty INTEGER NOT NULL DEFAULT 0,
+    unaccounted_penalty INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
 """
 
 DEFAULT_POSITIONS = [

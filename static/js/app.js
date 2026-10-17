@@ -48,6 +48,7 @@ const state = {
   loading: false,
   directorReport: { year: null, quarter: null, region: '', store: '', periods: [] },
   lessonReport: { lessons: [], lessonReportId: null, region: '', store: '', position: '', search: '' },
+  categoryAnalysis: { reports: [], categoryReportId: null, region: '' },
 };
 
 /* ===================== utils ===================== */
@@ -631,6 +632,74 @@ async function readLessonReportWorkbookRows(file) {
   return extractLessonReportRows(sheetRows);
 }
 
+// "Аттестация 2026 квартал 3 Комірники" — a per-position quarterly
+// categorization/attestation file. Title row carries year/quarter/
+// position; the data rows carry the raw metrics the category (1 = meets
+// every condition, 2 = misses at least one) was computed from.
+function extractCategoryReportRows(sheetRows) {
+  if (!sheetRows || sheetRows.length < 3) throw new Error('Файл порожній або має неочікувану структуру');
+  const titleRaw = String(sheetRows[0]?.[0] || '');
+  const m = /(\d{4})\s*квартал\s*(\d)\s+(.+)/i.exec(titleRaw);
+  if (!m) throw new Error('Не вдалося розпізнати заголовок «Аттестация YYYY квартал N Посада» у першому рядку файлу');
+  const year = m[1], quarter = m[2], position = m[3].trim();
+  const periodLabel = `${quarter} квартал ${year}`;
+
+  let headerIdx = -1, cols = null;
+  for (let i = 0; i < sheetRows.length; i++) {
+    const row = sheetRows[i];
+    if (!row || !row.length) continue;
+    const asStr = row.map((c) => String(c || '').trim());
+    if (asStr.includes('ПІБ') && asStr.includes('Потенц. кат.')) { headerIdx = i; cols = asStr; break; }
+  }
+  if (headerIdx === -1) throw new Error('Не знайдено заголовок таблиці (очікувались колонки «ПІБ», «Потенц. кат.»)');
+  const idx = {
+    region: cols.indexOf('Регіон'), store: cols.indexOf('Магазин'),
+    storeCategory: cols.indexOf('Кат-я м-на (Front/Back)'), complexityLevel: cols.indexOf('Рівень складності складу'),
+    name: cols.indexOf('ПІБ'), login: cols.indexOf('Логін'),
+    prevCategory: cols.indexOf('Попередня кат.'), potentialCategory: cols.indexOf('Потенц. кат.'),
+    rkWish: cols.indexOf('Побажання РК'), rkComment: cols.indexOf('Коментар РК'),
+    tests: cols.indexOf('Тести'), openQuestions: cols.indexOf('Відкриті питання'),
+    processErrors: cols.indexOf('Помилки в проц.'),
+    returnsFlag: cols.indexOf('Повернення на РЦ-Порожня коробка/некомплект'),
+    unaccountedFlag: cols.indexOf('Неоприбуткований товар'),
+    pickupSpeedRaw: cols.indexOf('Швидкість збору інтернет-замовлень, хв'),
+    confirmed: cols.indexOf('Підтвердження'),
+  };
+  const rows = [];
+  for (let i = headerIdx + 1; i < sheetRows.length; i++) {
+    const row = sheetRows[i];
+    if (!row || !row[idx.name]) continue;
+    rows.push({
+      region: String(row[idx.region] || '').trim(),
+      store: String(row[idx.store] || '').trim(),
+      storeCategory: String(row[idx.storeCategory] || '').trim(),
+      complexityLevel: row[idx.complexityLevel],
+      name: String(row[idx.name] || '').trim(),
+      login: String(row[idx.login] || '').trim(),
+      prevCategory: row[idx.prevCategory],
+      potentialCategory: row[idx.potentialCategory],
+      rkWish: String(row[idx.rkWish] || '').trim(),
+      rkComment: String(row[idx.rkComment] || '').trim(),
+      tests: row[idx.tests],
+      openQuestions: String(row[idx.openQuestions] || '').trim(),
+      processErrors: row[idx.processErrors],
+      returnsFlag: String(row[idx.returnsFlag] || '').trim(),
+      unaccountedFlag: String(row[idx.unaccountedFlag] || '').trim(),
+      pickupSpeedRaw: String(row[idx.pickupSpeedRaw] || '').trim(),
+      confirmed: String(row[idx.confirmed] || '').trim(),
+    });
+  }
+  return { position, periodLabel, rows };
+}
+
+async function readCategoryReportWorkbookRows(file) {
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const sheetRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: true });
+  return extractCategoryReportRows(sheetRows);
+}
+
 function detectAttestationPositionClient(rows) {
   const counts = {};
   rows.forEach((r) => { if (r.position) counts[r.position] = (counts[r.position] || 0) + 1; });
@@ -781,6 +850,8 @@ function renderPositionSwitch() {
   if (reportBtn) reportBtn.hidden = state.tab !== 'overall';
   const lessonReportBtn = document.getElementById('btn-lesson-report');
   if (lessonReportBtn) lessonReportBtn.hidden = state.tab !== 'overall';
+  const categoryAnalysisBtn = document.getElementById('btn-category-analysis');
+  if (categoryAnalysisBtn) categoryAnalysisBtn.hidden = state.tab !== 'overall';
   const el = document.getElementById('position-switch');
   if (state.tab === 'attestation') {
     el.hidden = false;
@@ -3776,6 +3847,365 @@ render();
 </body></html>`;
 }
 
+/* ===================== category analysis ("Аналіз категорій") =====================
+   Separate full-screen view for per-position quarterly categorization/
+   attestation reports (category 1 = meets every condition, category 2 =
+   misses at least one). Like lesson reports, each upload is its own
+   permanent snapshot (keyed by position+quarter) switchable from a
+   selector — but on top of the usual network/region breakdown, people
+   who landed in category 2 get checked against that position's
+   configured thresholds so "По регіонах" can surface WHICH condition is
+   actually blocking people in a given region, not just that fewer of
+   them reached category 1. */
+
+async function openCategoryAnalysisView() {
+  document.getElementById('app').hidden = true;
+  const view = document.getElementById('category-analysis-view');
+  view.hidden = false;
+  renderCategoryAnalysisShell();
+  await loadCategoryReports();
+}
+
+function closeCategoryAnalysisView() {
+  document.getElementById('category-analysis-view').hidden = true;
+  document.getElementById('app').hidden = false;
+}
+
+function renderCategoryAnalysisShell() {
+  const view = document.getElementById('category-analysis-view');
+  view.innerHTML = `
+    <div class="top-bar">
+      <div class="brand">
+        <img class="logo" src="static/assets/logo_green.png" alt="COMFY">
+        <div>
+          <div class="brand-title">Аналіз категорій</div>
+          <div class="brand-subtitle">Атестація та категоризація по посадах</div>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button class="btn btn-primary btn-sm" id="ca-upload">Завантажити звіт</button>
+        <button class="btn btn-secondary btn-sm" id="ca-back">← Назад у систему</button>
+      </div>
+    </div>
+    <div id="ca-content-area">
+      <!-- filled dynamically -->
+    </div>
+  `;
+  document.getElementById('ca-back').onclick = closeCategoryAnalysisView;
+  document.getElementById('ca-upload').onclick = openCategoryReportUploadModal;
+}
+
+function openCategoryReportUploadModal() {
+  const root = document.getElementById('modal-root');
+  root.innerHTML = `
+    <div class="modal-backdrop" id="ca-upload-backdrop">
+      <div class="modal">
+        <button class="modal-close" id="ca-upload-close">✕</button>
+        <h2>Завантажити звіт по посаді</h2>
+        <p class="modal-subtitle">Один файл — одна посада за один квартал («Аттестация YYYY квартал N Посада» в першому рядку). Повторне завантаження того самого періоду для цієї посади замінює його повністю.</p>
+        <div class="field-group">
+          <label>Файл</label>
+          <input type="file" id="ca-upload-file" accept=".xls,.xlsx">
+        </div>
+        <div id="ca-upload-preview"></div>
+        <div id="ca-upload-error" class="error-text"></div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" id="ca-upload-cancel">Скасувати</button>
+          <button class="btn btn-primary" id="ca-upload-parse">Перевірити файл</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.getElementById('ca-upload-close').onclick = closeModal;
+  document.getElementById('ca-upload-cancel').onclick = closeModal;
+  document.getElementById('ca-upload-backdrop').addEventListener('click', (e) => {
+    if (e.target.id === 'ca-upload-backdrop') closeModal();
+  });
+  document.getElementById('ca-upload-parse').onclick = handleCategoryReportParse;
+}
+
+async function handleCategoryReportParse() {
+  const errorEl = document.getElementById('ca-upload-error');
+  errorEl.textContent = '';
+  const file = document.getElementById('ca-upload-file').files[0];
+  if (!file) { errorEl.textContent = 'Оберіть файл.'; return; }
+
+  let parsed;
+  try {
+    parsed = await readCategoryReportWorkbookRows(file);
+  } catch (e) {
+    errorEl.textContent = `Помилка читання файлу: ${e.message}`;
+    return;
+  }
+  if (!parsed.rows.length) {
+    errorEl.textContent = 'Не знайдено жодного рядка співробітників у файлі.';
+    return;
+  }
+
+  const existing = state.categoryAnalysis.reports.find(
+    (r) => r.position === parsed.position && r.periodLabel === parsed.periodLabel
+  );
+  document.getElementById('ca-upload-preview').innerHTML = `
+    <div class="upload-summary">${escapeHtml(parsed.position)}, ${escapeHtml(parsed.periodLabel)} — ${parsed.rows.length} співробітників.${existing ? ' Цей звіт вже є в базі — буде повністю оновлено.' : ' Новий звіт.'}</div>
+  `;
+  const actions = document.querySelector('#ca-upload-backdrop .modal-actions');
+  actions.innerHTML = `
+    <button class="btn btn-secondary" id="ca-upload-cancel2">Скасувати</button>
+    <button class="btn btn-primary" id="ca-upload-save">Зберегти</button>
+  `;
+  document.getElementById('ca-upload-cancel2').onclick = closeModal;
+  document.getElementById('ca-upload-save').onclick = async () => {
+    const btn = document.getElementById('ca-upload-save');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Збереження…';
+    try {
+      const resp = await api('/api/upload-category-report', {
+        method: 'POST',
+        body: JSON.stringify({ position: parsed.position, periodLabel: parsed.periodLabel, rows: parsed.rows }),
+      });
+      closeModal();
+      showToast(`Звіт «${parsed.position}, ${parsed.periodLabel}» збережено: ${resp.rowsCount} співробітників.`);
+      await loadCategoryReports(resp.categoryReportId);
+    } catch (e) {
+      document.getElementById('ca-upload-error').textContent = e.message;
+      btn.disabled = false;
+      btn.textContent = 'Зберегти';
+    }
+  };
+}
+
+async function loadCategoryReports(selectId) {
+  const data = await api('/api/category-reports');
+  state.categoryAnalysis.reports = data.reports || [];
+  if (!state.categoryAnalysis.reports.length) {
+    document.getElementById('ca-content-area').innerHTML = `
+      <div class="empty-state">
+        <h2>Ще немає звітів</h2>
+        <p>Натисніть «Завантажити звіт» вгорі, щоб додати перший звіт по посаді.</p>
+      </div>`;
+    return;
+  }
+  const latest = state.categoryAnalysis.reports[state.categoryAnalysis.reports.length - 1];
+  const wanted = selectId || state.categoryAnalysis.categoryReportId;
+  state.categoryAnalysis.categoryReportId = state.categoryAnalysis.reports.some((r) => r.id === wanted)
+    ? wanted
+    : latest.id;
+  renderCategoryAnalysisContent();
+  await refreshCategoryAnalysisData();
+}
+
+function renderCategoryAnalysisContent() {
+  const { reports, categoryReportId } = state.categoryAnalysis;
+  const el = document.getElementById('ca-content-area');
+  const sortedReports = [...reports].reverse();
+  const mostRecentId = reports[reports.length - 1]?.id;
+  el.innerHTML = `
+    <div class="filters" id="ca-filters">
+      <div class="filter-field" style="min-width:280px;">
+        <label>Звіт</label>
+        <select id="ca-report">
+          ${sortedReports.map((r) => `<option value="${r.id}" ${r.id === categoryReportId ? 'selected' : ''}>${escapeHtml(r.position)} — ${escapeHtml(r.periodLabel)}${r.id === mostRecentId ? ' (останній)' : ''}</option>`).join('')}
+        </select>
+      </div>
+      <div class="filter-field">
+        <label>Регіон</label>
+        <select id="ca-region"><option value="">Уся мережа</option></select>
+      </div>
+    </div>
+    <div class="card" id="ca-criteria-card"></div>
+    <div class="kpi-grid" id="ca-kpi-grid"></div>
+    <div class="card">
+      <h3>По регіонах</h3>
+      <p class="field-hint">Завжди всі регіони, незалежно від фільтра вище. "Проблемні зони" — за якою саме умовою найчастіше не вистачає до 1 категорії серед тих, хто її не отримав.</p>
+      <div class="table-scroll"><table class="data-table" id="ca-regions-table"></table></div>
+    </div>
+    <div class="card">
+      <h3>Співробітники</h3>
+      <p class="field-hint" id="ca-count-hint"></p>
+      <div class="table-scroll"><table class="data-table" id="ca-people-table"></table></div>
+      <div id="ca-people-pagination"></div>
+    </div>
+  `;
+  document.getElementById('ca-report').addEventListener('change', async (e) => {
+    state.categoryAnalysis.categoryReportId = Number(e.target.value);
+    state.categoryAnalysis.region = '';
+    renderCategoryAnalysisContent();
+    await refreshCategoryAnalysisData();
+  });
+  document.getElementById('ca-region').addEventListener('change', async (e) => {
+    state.categoryAnalysis.region = e.target.value;
+    await refreshCategoryAnalysisData();
+  });
+}
+
+async function refreshCategoryAnalysisData() {
+  const { categoryReportId, region, reports } = state.categoryAnalysis;
+  const report = reports.find((r) => r.id === categoryReportId);
+  const [filters, summary, byRegion, people, criteriaResp] = await Promise.all([
+    api(`/api/category-report-filters?${qs({ categoryReportId })}`),
+    api(`/api/category-report-summary?${qs({ categoryReportId, region })}`),
+    api(`/api/category-report-by-region?${qs({ categoryReportId })}`),
+    api(`/api/category-report-people?${qs({ categoryReportId, region })}`),
+    api(`/api/category-criteria?${qs({ position: report.position })}`),
+  ]);
+  const regionSelect = document.getElementById('ca-region');
+  regionSelect.innerHTML = `<option value="">Уся мережа</option>${(filters.regions || []).map((r) => `<option value="${escapeHtml(r)}" ${r === region ? 'selected' : ''}>${escapeHtml(r)}</option>`).join('')}`;
+
+  renderCategoryCriteriaCard(report.position, criteriaResp.criteria);
+  renderCategoryAnalysisKpis(summary);
+  renderCategoryAnalysisByRegion(byRegion.regions || []);
+  state._caPeople = people.people || [];
+  resetPageState('ca-people');
+  renderCategoryAnalysisPeopleTable();
+}
+
+function renderCategoryCriteriaCard(position, criteria) {
+  const card = document.getElementById('ca-criteria-card');
+  if (!criteria) {
+    card.innerHTML = `
+      <h3>Умови категоризації — ${escapeHtml(position)}</h3>
+      <p class="field-hint">Критерії ще не задані для цієї посади — без них "проблемні зони" по регіонах не показуватимуть причину.</p>
+      <button class="btn btn-secondary btn-sm" id="ca-edit-criteria">Додати критерії</button>
+    `;
+  } else {
+    card.innerHTML = `
+      <h3>Умови категоризації — ${escapeHtml(position)} <button class="btn btn-secondary btn-sm" id="ca-edit-criteria" style="margin-left:10px;">Редагувати</button></h3>
+      <p style="white-space:pre-wrap; margin:0;">${escapeHtml(criteria.criteriaText)}</p>
+    `;
+  }
+  document.getElementById('ca-edit-criteria').onclick = () => openCategoryCriteriaModal(position, criteria);
+}
+
+function openCategoryCriteriaModal(position, criteria) {
+  const root = document.getElementById('modal-root');
+  const c = criteria || { criteriaText: '', testsMin: '', processErrorsMax: '', pickupSpeedMaxMin: '', returnsPenalty: false, unaccountedPenalty: false };
+  root.innerHTML = `
+    <div class="modal-backdrop" id="ca-criteria-backdrop">
+      <div class="modal">
+        <button class="modal-close" id="ca-criteria-close">✕</button>
+        <h2>Умови категоризації — ${escapeHtml(position)}</h2>
+        <p class="modal-subtitle">Текстовий опис показується як підказка на екрані. Числові пороги (не обов'язково всі) живлять автоматичний пошук "проблемних зон" по регіонах — категорія 1 присвоюється, лише якщо виконані всі задані умови.</p>
+        <div class="field-group">
+          <label>Опис умов (підказка на екрані)</label>
+          <textarea id="ca-c-text" rows="6" style="width:100%; padding:10px 12px; border:1px solid var(--color-border); border-radius:var(--radius-sm); font-family:inherit;">${escapeHtml(c.criteriaText)}</textarea>
+        </div>
+        <div class="field-group">
+          <label>Тести (+ відкриті питання), мінімум %</label>
+          <input type="number" id="ca-c-tests" value="${c.testsMin ?? ''}" placeholder="напр. 90">
+        </div>
+        <div class="field-group">
+          <label>Помилки в процесах, максимум</label>
+          <input type="number" id="ca-c-errors" value="${c.processErrorsMax ?? ''}" placeholder="напр. 3">
+        </div>
+        <div class="field-group">
+          <label>Швидкість збору інтернет-замовлень, максимум хв</label>
+          <input type="number" id="ca-c-speed" value="${c.pickupSpeedMaxMin ?? ''}" placeholder="напр. 10">
+        </div>
+        <div class="field-group">
+          <label class="inline"><input type="checkbox" id="ca-c-returns" ${c.returnsPenalty ? 'checked' : ''}> Наявність повернень на РЦ знижує категорію</label>
+        </div>
+        <div class="field-group">
+          <label class="inline"><input type="checkbox" id="ca-c-unaccounted" ${c.unaccountedPenalty ? 'checked' : ''}> Наявність неоприбуткованого товару знижує категорію</label>
+        </div>
+        <div id="ca-criteria-error" class="error-text"></div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" id="ca-criteria-cancel">Скасувати</button>
+          <button class="btn btn-primary" id="ca-criteria-save">Зберегти</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.getElementById('ca-criteria-close').onclick = closeModal;
+  document.getElementById('ca-criteria-cancel').onclick = closeModal;
+  document.getElementById('ca-criteria-backdrop').addEventListener('click', (e) => {
+    if (e.target.id === 'ca-criteria-backdrop') closeModal();
+  });
+  document.getElementById('ca-criteria-save').onclick = async () => {
+    const btn = document.getElementById('ca-criteria-save');
+    btn.disabled = true;
+    try {
+      await api('/api/category-criteria', {
+        method: 'POST',
+        body: JSON.stringify({
+          position,
+          criteriaText: document.getElementById('ca-c-text').value,
+          testsMin: document.getElementById('ca-c-tests').value,
+          processErrorsMax: document.getElementById('ca-c-errors').value,
+          pickupSpeedMaxMin: document.getElementById('ca-c-speed').value,
+          returnsPenalty: document.getElementById('ca-c-returns').checked,
+          unaccountedPenalty: document.getElementById('ca-c-unaccounted').checked,
+        }),
+      });
+      closeModal();
+      showToast('Критерії збережено.');
+      await refreshCategoryAnalysisData();
+    } catch (e) {
+      document.getElementById('ca-criteria-error').textContent = e.message;
+      btn.disabled = false;
+    }
+  };
+}
+
+function renderCategoryAnalysisKpis(summary) {
+  const cat1Pct = summary.total ? Math.round((summary.category1 / summary.total) * 1000) / 10 : null;
+  const tiles = [
+    { label: 'Усього співробітників', value: fmtNum(summary.total), accent: '' },
+    { label: 'Категорія 1', value: `${fmtNum(summary.category1)} (${fmtPct(cat1Pct)})`, accent: 'green' },
+    { label: 'Середній бал тестів', value: fmtPct(summary.avgTests), accent: '' },
+  ];
+  document.getElementById('ca-kpi-grid').innerHTML = tiles.map((tl) => `
+    <div class="kpi-tile ${tl.accent ? `accent-${tl.accent}` : ''}">
+      <div class="kpi-value">${tl.value}</div>
+      <div class="kpi-label">${escapeHtml(tl.label)}</div>
+    </div>`).join('');
+}
+
+function renderCategoryAnalysisByRegion(regions) {
+  const table = document.getElementById('ca-regions-table');
+  table.innerHTML = `
+    <thead><tr><th>Регіон</th><th>Усього</th><th>Категорія 1</th><th>Середній тест</th><th>Проблемні зони (категорія 2)</th></tr></thead>
+    <tbody>${regions.map((r) => {
+      const cat1Pct = r.total ? Math.round((r.category1 / r.total) * 1000) / 10 : null;
+      const reasons = r.failReasons.length
+        ? r.failReasons.map((f) => `${escapeHtml(f.reason)} — ${f.count}`).join(', ')
+        : (r.category2 ? '<span class="muted">критерії не задані</span>' : '<span class="muted">—</span>');
+      return `
+      <tr>
+        <td>${escapeHtml(r.region)}</td>
+        <td>${fmtNum(r.total)}</td>
+        <td>${progressCellHtml(cat1Pct)}</td>
+        <td>${progressCellHtml(r.avgTests)}</td>
+        <td>${reasons}</td>
+      </tr>`;
+    }).join('') || `<tr><td colspan="5" class="muted">Немає даних</td></tr>`}</tbody>
+  `;
+}
+
+function renderCategoryAnalysisPeopleTable() {
+  const rows = state._caPeople || [];
+  const key = 'ca-people';
+  const table = document.getElementById('ca-people-table');
+  const pageRows = pageSlice(key, rows);
+  table.innerHTML = `
+    <thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Попередня</th><th>Потенційна</th><th>Тести</th><th>Чому не 1 категорія</th></tr></thead>
+    <tbody>${pageRows.map((p) => `
+      <tr>
+        <td>${escapeHtml(p.name)}</td>
+        <td>${escapeHtml(p.region)}</td>
+        <td>${escapeHtml(p.store)}</td>
+        <td>${fmtNum(p.prevCategory)}</td>
+        <td>${fmtNum(p.potentialCategory)}</td>
+        <td>${progressCellHtml(p.tests)}</td>
+        <td>${p.failedCriteria.length ? p.failedCriteria.map((f) => `<span class="badge status-orange">${escapeHtml(f)}</span>`).join(' ') : '—'}</td>
+      </tr>`).join('') || `<tr><td colspan="7" class="muted">Немає даних за цим фільтром</td></tr>`}</tbody>
+  `;
+  const hint = document.getElementById('ca-count-hint');
+  if (hint) hint.textContent = `Показано ${rows.length} співробітників.`;
+  const pager = document.getElementById('ca-people-pagination');
+  pager.innerHTML = paginationBarHtml(key, rows.length);
+  wirePagination(pager, key, renderCategoryAnalysisPeopleTable);
+}
+
 /* ===================== init ===================== */
 
 function bindTopActions() {
@@ -3786,6 +4216,7 @@ function bindTopActions() {
   document.getElementById('btn-classify').addEventListener('click', openClassifyModal);
   document.getElementById('btn-director-report').addEventListener('click', openDirectorReportView);
   document.getElementById('btn-lesson-report').addEventListener('click', openLessonReportView);
+  document.getElementById('btn-category-analysis').addEventListener('click', openCategoryAnalysisView);
 }
 
 bindTabs();

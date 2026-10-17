@@ -14,7 +14,7 @@ from aggregate import (
     clean_aep_row, aep_goal_for_quarter, aggregate_aep, distribution_aep,
     normalize_person_name, normalize_roster_tier, build_roster_matcher, find_near_duplicate_names,
     suggest_name_matches, find_roster_duplicate_rows, clean_director_report_row,
-    clean_lesson_report_row,
+    clean_lesson_report_row, clean_category_report_row,
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1569,6 +1569,279 @@ def lesson_report_raw():
         "region": r["region"], "store": r["store"], "position": r["position"], "name": r["name"],
         "material": r["material"], "test": r["test"], "testDate": r["test_date"],
     } for r in rows]})
+
+
+# ---------- "Аналіз категорій" — per-position attestation/categorization ----------
+
+@app.post("/api/upload-category-report")
+def upload_category_report():
+    data = request.get_json(silent=True) or {}
+    position = str(data.get("position", "")).strip()
+    period_label = str(data.get("periodLabel", "")).strip()
+    raw_rows = data.get("rows") or []
+    if not position or not period_label:
+        return jsonify({"error": "Не вдалося визначити посаду і період з файлу"}), 400
+    if not raw_rows:
+        return jsonify({"error": "У файлі не знайдено жодного рядка співробітників"}), 400
+
+    rows = [clean_category_report_row(r) for r in raw_rows]
+    rows = [r for r in rows if r["name"]]
+
+    conn = db.get_db()
+    try:
+        conn.execute("BEGIN")
+        existing = conn.execute(
+            "SELECT id FROM category_reports WHERE position=? AND period_label=?",
+            (position, period_label),
+        ).fetchone()
+        uploaded_at = datetime.datetime.utcnow().isoformat() + "Z"
+        if existing:
+            category_report_id = existing["id"]
+            conn.execute("UPDATE category_reports SET uploaded_at=? WHERE id=?", (uploaded_at, category_report_id))
+            conn.execute("DELETE FROM category_report_details WHERE category_report_id=?", (category_report_id,))
+        else:
+            cur = conn.execute(
+                "INSERT INTO category_reports (position, period_label, uploaded_at) VALUES (?,?,?)",
+                (position, period_label, uploaded_at),
+            )
+            category_report_id = cur.lastrowid
+
+        for r in rows:
+            conn.execute(
+                "INSERT INTO category_report_details (category_report_id, region, store, store_category, "
+                "complexity_level, name, login, prev_category, potential_category, rk_wish, rk_comment, "
+                "tests, open_questions, process_errors, returns_flag, unaccounted_flag, pickup_speed_min, confirmed) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (category_report_id, r["region"], r["store"], r["storeCategory"], r["complexityLevel"],
+                 r["name"], r["login"], r["prevCategory"], r["potentialCategory"], r["rkWish"], r["rkComment"],
+                 r["tests"], r["openQuestions"], r["processErrors"], r["returnsFlag"], r["unaccountedFlag"],
+                 r["pickupSpeedMin"], r["confirmed"]),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    return jsonify({"ok": True, "categoryReportId": category_report_id, "rowsCount": len(rows)})
+
+
+@app.get("/api/category-reports")
+def list_category_reports():
+    conn = db.get_db()
+    rows = conn.execute(
+        "SELECT id, position, period_label, uploaded_at FROM category_reports ORDER BY uploaded_at ASC"
+    ).fetchall()
+    conn.close()
+    return jsonify({"reports": [
+        {"id": r["id"], "position": r["position"], "periodLabel": r["period_label"], "uploadedAt": r["uploaded_at"]}
+        for r in rows
+    ]})
+
+
+def _category_report_where(args):
+    clauses = ["category_report_id=?"]
+    params = [args.get("categoryReportId")]
+    if args.get("region"):
+        clauses.append("region=?")
+        params.append(args["region"])
+    return " AND ".join(clauses), params
+
+
+@app.get("/api/category-report-filters")
+def category_report_filters():
+    category_report_id = request.args.get("categoryReportId")
+    if not category_report_id:
+        return jsonify({"error": "categoryReportId обов'язковий"}), 400
+    conn = db.get_db()
+    regions = conn.execute(
+        "SELECT DISTINCT region FROM category_report_details WHERE category_report_id=? AND region != '' ORDER BY region",
+        (category_report_id,),
+    ).fetchall()
+    conn.close()
+    return jsonify({"regions": [r["region"] for r in regions]})
+
+
+def _get_criteria(conn, position):
+    return conn.execute("SELECT * FROM category_criteria WHERE position=?", (position,)).fetchone()
+
+
+def _failed_criteria(row, criteria):
+    """Which of the position's category-1 conditions this person's raw
+    values fail — only checks conditions the position actually has a
+    threshold configured for, so an unconfigured position just reports
+    no reasons rather than guessing at thresholds nobody entered."""
+    if not criteria:
+        return []
+    failed = []
+    if criteria["tests_min"] is not None and row["tests"] is not None and row["tests"] < criteria["tests_min"]:
+        failed.append("Тести")
+    if (criteria["process_errors_max"] is not None and row["process_errors"] is not None
+            and row["process_errors"] > criteria["process_errors_max"]):
+        failed.append("Помилки в процесах")
+    if (criteria["pickup_speed_max_min"] is not None and row["pickup_speed_min"] is not None
+            and row["pickup_speed_min"] > criteria["pickup_speed_max_min"]):
+        failed.append("Швидкість збору інтернет-замовлень")
+    if criteria["returns_penalty"] and row["returns_flag"]:
+        failed.append("Повернення на РЦ")
+    if criteria["unaccounted_penalty"] and row["unaccounted_flag"]:
+        failed.append("Неоприбуткований товар")
+    return failed
+
+
+@app.get("/api/category-report-summary")
+def category_report_summary():
+    category_report_id = request.args.get("categoryReportId")
+    if not category_report_id:
+        return jsonify({"error": "categoryReportId обов'язковий"}), 400
+    where, params = _category_report_where(request.args)
+    conn = db.get_db()
+    row = conn.execute(
+        f"SELECT COUNT(*) AS total, AVG(tests) AS avgTests, "
+        f"SUM(CASE WHEN potential_category = 1 THEN 1 ELSE 0 END) AS cat1, "
+        f"SUM(CASE WHEN potential_category = 2 THEN 1 ELSE 0 END) AS cat2 "
+        f"FROM category_report_details WHERE {where}",
+        params,
+    ).fetchone()
+    conn.close()
+    return jsonify({
+        "total": row["total"],
+        "avgTests": round(row["avgTests"], 1) if row["avgTests"] is not None else None,
+        "category1": row["cat1"] or 0,
+        "category2": row["cat2"] or 0,
+    })
+
+
+@app.get("/api/category-report-by-region")
+def category_report_by_region():
+    """Always the full region breakdown (ignores the region filter) plus,
+    for people who didn't reach category 1, which specific criteria they
+    failed — the "problem zone" signal: a region with a cluster of the
+    same failed criterion points at a real, fixable local issue rather
+    than scattered individual misses."""
+    category_report_id = request.args.get("categoryReportId")
+    if not category_report_id:
+        return jsonify({"error": "categoryReportId обов'язковий"}), 400
+    conn = db.get_db()
+    report = conn.execute("SELECT position FROM category_reports WHERE id=?", (category_report_id,)).fetchone()
+    if not report:
+        conn.close()
+        return jsonify({"regions": []})
+    criteria = _get_criteria(conn, report["position"])
+    rows = conn.execute(
+        "SELECT * FROM category_report_details WHERE category_report_id=? AND region != ''",
+        (category_report_id,),
+    ).fetchall()
+    conn.close()
+
+    by_region = {}
+    for r in rows:
+        b = by_region.setdefault(r["region"], {
+            "region": r["region"], "total": 0, "category1": 0, "category2": 0,
+            "testsSum": 0.0, "testsCount": 0, "failReasons": {},
+        })
+        b["total"] += 1
+        if r["potential_category"] == 1:
+            b["category1"] += 1
+        elif r["potential_category"] == 2:
+            b["category2"] += 1
+        if r["tests"] is not None:
+            b["testsSum"] += r["tests"]
+            b["testsCount"] += 1
+        if r["potential_category"] == 2:
+            for reason in _failed_criteria(r, criteria):
+                b["failReasons"][reason] = b["failReasons"].get(reason, 0) + 1
+
+    regions = []
+    for b in by_region.values():
+        regions.append({
+            "region": b["region"], "total": b["total"], "category1": b["category1"], "category2": b["category2"],
+            "avgTests": round(b["testsSum"] / b["testsCount"], 1) if b["testsCount"] else None,
+            "failReasons": sorted(
+                [{"reason": k, "count": v} for k, v in b["failReasons"].items()],
+                key=lambda x: -x["count"],
+            ),
+        })
+    regions.sort(key=lambda r: -(r["category2"] / r["total"] if r["total"] else 0))
+    return jsonify({"regions": regions, "hasCriteria": criteria is not None})
+
+
+@app.get("/api/category-report-people")
+def category_report_people():
+    category_report_id = request.args.get("categoryReportId")
+    if not category_report_id:
+        return jsonify({"error": "categoryReportId обов'язковий"}), 400
+    where, params = _category_report_where(request.args)
+    conn = db.get_db()
+    report = conn.execute("SELECT position FROM category_reports WHERE id=?", (category_report_id,)).fetchone()
+    criteria = _get_criteria(conn, report["position"]) if report else None
+    rows = conn.execute(
+        f"SELECT * FROM category_report_details WHERE {where} ORDER BY potential_category DESC, tests ASC",
+        params,
+    ).fetchall()
+    conn.close()
+    return jsonify({"people": [{
+        "region": r["region"], "store": r["store"], "name": r["name"],
+        "prevCategory": r["prev_category"], "potentialCategory": r["potential_category"],
+        "rkWish": r["rk_wish"], "rkComment": r["rk_comment"],
+        "tests": r["tests"], "processErrors": r["process_errors"],
+        "returnsFlag": r["returns_flag"], "unaccountedFlag": r["unaccounted_flag"],
+        "pickupSpeedMin": r["pickup_speed_min"], "confirmed": r["confirmed"],
+        "failedCriteria": _failed_criteria(r, criteria),
+    } for r in rows]})
+
+
+@app.get("/api/category-criteria")
+def get_category_criteria():
+    position = request.args.get("position")
+    if not position:
+        return jsonify({"error": "position обов'язковий"}), 400
+    conn = db.get_db()
+    row = _get_criteria(conn, position)
+    conn.close()
+    if not row:
+        return jsonify({"criteria": None})
+    return jsonify({"criteria": {
+        "criteriaText": row["criteria_text"],
+        "testsMin": row["tests_min"],
+        "processErrorsMax": row["process_errors_max"],
+        "pickupSpeedMaxMin": row["pickup_speed_max_min"],
+        "returnsPenalty": bool(row["returns_penalty"]),
+        "unaccountedPenalty": bool(row["unaccounted_penalty"]),
+    }})
+
+
+@app.post("/api/category-criteria")
+def set_category_criteria():
+    data = request.get_json(silent=True) or {}
+    position = str(data.get("position", "")).strip()
+    criteria_text = str(data.get("criteriaText", "")).strip()
+    if not position:
+        return jsonify({"error": "position обов'язковий"}), 400
+
+    def num(v):
+        try:
+            n = float(v)
+            return n if n == n else None
+        except (TypeError, ValueError):
+            return None
+
+    conn = db.get_db()
+    conn.execute(
+        "INSERT INTO category_criteria (position, criteria_text, tests_min, process_errors_max, "
+        "pickup_speed_max_min, returns_penalty, unaccounted_penalty, updated_at) VALUES (?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(position) DO UPDATE SET criteria_text=excluded.criteria_text, tests_min=excluded.tests_min, "
+        "process_errors_max=excluded.process_errors_max, pickup_speed_max_min=excluded.pickup_speed_max_min, "
+        "returns_penalty=excluded.returns_penalty, unaccounted_penalty=excluded.unaccounted_penalty, "
+        "updated_at=excluded.updated_at",
+        (position, criteria_text, num(data.get("testsMin")), num(data.get("processErrorsMax")),
+         num(data.get("pickupSpeedMaxMin")), 1 if data.get("returnsPenalty") else 0,
+         1 if data.get("unaccountedPenalty") else 0, datetime.datetime.utcnow().isoformat() + "Z"),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
 
 
 # ---------- periods / trend ----------
