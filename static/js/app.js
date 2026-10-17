@@ -48,7 +48,7 @@ const state = {
   loading: false,
   directorReport: { year: null, quarter: null, region: '', store: '', periods: [] },
   lessonReport: { lessons: [], lessonReportId: null, region: '', store: '', position: '', search: '' },
-  categoryAnalysis: { reports: [], categoryReportId: null, region: '', withApprovals: false },
+  categoryAnalysis: { reports: [], categoryReportId: null, region: '', withApprovals: false, criteriaExpanded: false },
 };
 
 /* ===================== utils ===================== */
@@ -4165,15 +4165,28 @@ function renderCategoryCriteriaCard(position, criteria) {
       <p class="field-hint">Критерії ще не задані для цієї посади — без них "проблемні зони" по регіонах не показуватимуть причину.</p>
       <button class="btn btn-secondary btn-sm" id="ca-edit-criteria">Додати критерії</button>
     `;
-  } else {
-    const rulesRows = renderRulesTableRows(criteria.rules);
-    card.innerHTML = `
-      <h3>Умови категоризації — ${escapeHtml(position)} <button class="btn btn-secondary btn-sm" id="ca-edit-criteria" style="margin-left:10px;">Редагувати</button></h3>
+    document.getElementById('ca-edit-criteria').onclick = () => openCategoryCriteriaModal(position, criteria);
+    return;
+  }
+  const expanded = !!state.categoryAnalysis.criteriaExpanded;
+  const rulesRows = renderRulesTableRows(criteria.rules);
+  const toggleLabel = expanded ? 'Згорнути' : `Показати умови${criteria.rules.length ? ` (${criteria.rules.length})` : ''}`;
+  card.innerHTML = `
+    <h3 style="display:flex; align-items:center; flex-wrap:wrap; gap:10px;">
+      <span>Умови категоризації — ${escapeHtml(position)}</span>
+      <button class="btn btn-secondary btn-sm" id="ca-criteria-toggle">${toggleLabel}</button>
+      <button class="btn btn-secondary btn-sm" id="ca-edit-criteria">Редагувати</button>
+    </h3>
+    ${expanded ? `
       <p style="white-space:pre-wrap; margin:0;">${escapeHtml(criteria.criteriaText)}</p>
       ${rulesRows ? `<div class="table-scroll"><table class="data-table" style="margin-top:12px;"><thead><tr><th>Критерій</th><th>Умова</th></tr></thead><tbody>${rulesRows}</tbody></table></div>` : ''}
-    `;
-  }
+    ` : ''}
+  `;
   document.getElementById('ca-edit-criteria').onclick = () => openCategoryCriteriaModal(position, criteria);
+  document.getElementById('ca-criteria-toggle').onclick = () => {
+    state.categoryAnalysis.criteriaExpanded = !expanded;
+    renderCategoryCriteriaCard(position, criteria);
+  };
 }
 
 async function openCategoryCriteriaModal(position, criteria) {
