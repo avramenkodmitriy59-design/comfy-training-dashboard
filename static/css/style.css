@@ -262,11 +262,14 @@ a { color: var(--color-green-dark); }
 .kpi-tile.accent-yellow .kpi-value { color: var(--color-yellow); }
 .kpi-tile.accent-muted { opacity: 0.85; }
 
-/* Director report, lesson report and category analysis have only 3 KPI
-   tiles (vs the main dashboard's 7+), so they get their own column count
-   and larger value text instead of leaving an empty 4th column. */
-#dr-kpi-grid, #lr-kpi-grid, #ca-kpi-grid, #x-kpi {
+/* Director report and lesson report have only 3 KPI tiles (vs the main
+   dashboard's 7+), category analysis has 4, so they get their own column
+   count and larger value text instead of leaving an empty column. */
+#dr-kpi-grid, #lr-kpi-grid, #x-kpi {
   grid-template-columns: repeat(3, 1fr);
+}
+#ca-kpi-grid {
+  grid-template-columns: repeat(4, 1fr);
 }
 #dr-kpi-grid .kpi-value, #lr-kpi-grid .kpi-value, #ca-kpi-grid .kpi-value, #x-kpi .kpi-value { font-size: 38px; }
 #dr-kpi-grid .kpi-label, #lr-kpi-grid .kpi-label, #ca-kpi-grid .kpi-label, #x-kpi .kpi-label { font-size: 14px; }
@@ -462,3 +465,14 @@ table.data-table tr.row-clickable:hover td { background: #f0f2f5; }
 
 .muted { color: var(--color-muted); }
 .mt-0 { margin-top: 0; }
+
+.bottleneck-list { list-style: none; margin: 10px 0 0; padding: 0; }
+.bottleneck-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--color-border);
+}
+.bottleneck-list li:last-child { border-bottom: none; }
+.bottleneck-list li strong { color: var(--color-red); font-size: 16px; }

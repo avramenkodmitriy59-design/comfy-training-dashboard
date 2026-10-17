@@ -4019,11 +4019,14 @@ function renderCategoryAnalysisContent() {
         </select>
       </div>
     </div>
-    <div class="card" id="ca-criteria-card"></div>
+    <div class="grid-2">
+      <div class="card" id="ca-criteria-card"></div>
+      <div class="card" id="ca-bottlenecks-card"></div>
+    </div>
     <div class="kpi-grid" id="ca-kpi-grid"></div>
     <div class="card">
       <h3>По регіонах</h3>
-      <p class="field-hint">Завжди всі регіони, незалежно від фільтра вище. "Проблемні зони" — за якою саме умовою найчастіше не вистачає до 1 категорії серед тих, хто її не отримав за розрахунком (незалежно від погоджень).</p>
+      <p class="field-hint">Завжди всі регіони, незалежно від фільтра вище. "Проблемні зони" — за якою саме умовою найчастіше не вистачає до 1 категорії серед тих, хто її не отримав за розрахунком (незалежно від погоджень). Клік по регіону — розбивка по магазинах.</p>
       <div class="table-scroll"><table class="data-table" id="ca-regions-table"></table></div>
     </div>
     <div class="card">
@@ -4065,10 +4068,40 @@ async function refreshCategoryAnalysisData() {
 
   renderCategoryCriteriaCard(report.position, criteriaResp.criteria);
   renderCategoryAnalysisKpis(summary);
-  renderCategoryAnalysisByRegion(byRegion.regions || []);
+  state._caRegions = byRegion.regions || [];
+  renderCategoryAnalysisByRegion(state._caRegions);
+  renderCategoryBottlenecksCard(state._caRegions, region);
   state._caPeople = people.people || [];
   resetPageState('ca-people');
   renderCategoryAnalysisPeopleTable();
+}
+
+function renderCategoryBottlenecksCard(regions, selectedRegion) {
+  const card = document.getElementById('ca-bottlenecks-card');
+  if (!card) return;
+  let reasons;
+  let scopeLabel;
+  if (selectedRegion) {
+    const r = regions.find((x) => x.region === selectedRegion);
+    reasons = r ? r.failReasons : [];
+    scopeLabel = escapeHtml(selectedRegion);
+  } else {
+    const totals = {};
+    regions.forEach((r) => {
+      r.failReasons.forEach((f) => { totals[f.reason] = (totals[f.reason] || 0) + f.count; });
+    });
+    reasons = Object.entries(totals)
+      .map(([reason, count]) => ({ reason, count }))
+      .sort((a, b) => b.count - a.count);
+    scopeLabel = 'уся мережа';
+  }
+  card.innerHTML = `
+    <h3>Вузькі місця — ${scopeLabel}</h3>
+    <p class="field-hint">За якою умовою найчастіше не вистачає до 1 категорії (незалежно від погоджень РК).</p>
+    ${reasons.length ? `<ul class="bottleneck-list">${reasons.slice(0, 6).map((f) => `
+      <li><span>${escapeHtml(f.reason)}</span><strong>${fmtNum(f.count)}</strong></li>`).join('')}</ul>`
+      : '<p class="muted">Немає даних — або критерії ще не задані, або всі в межах норми.</p>'}
+  `;
 }
 
 function renderCategoryCriteriaCard(position, criteria) {
@@ -4160,9 +4193,11 @@ function openCategoryCriteriaModal(position, criteria) {
 
 function renderCategoryAnalysisKpis(summary) {
   const cat1Pct = summary.total ? Math.round((summary.category1 / summary.total) * 1000) / 10 : null;
+  const cat2Pct = summary.total ? Math.round((summary.category2 / summary.total) * 1000) / 10 : null;
   const tiles = [
     { label: 'Усього співробітників', value: fmtNum(summary.total), accent: '' },
     { label: 'Категорія 1', value: `${fmtNum(summary.category1)} (${fmtPct(cat1Pct)})`, accent: 'green' },
+    { label: 'Категорія 2', value: `${fmtNum(summary.category2)} (${fmtPct(cat2Pct)})`, accent: 'red' },
     { label: 'Середній бал тестів', value: fmtPct(summary.avgTests), accent: '' },
   ];
   document.getElementById('ca-kpi-grid').innerHTML = tiles.map((tl) => `
@@ -4176,13 +4211,13 @@ function renderCategoryAnalysisByRegion(regions) {
   const table = document.getElementById('ca-regions-table');
   table.innerHTML = `
     <thead><tr><th>Регіон</th><th>Усього</th><th>Категорія 1</th><th>Середній тест</th><th>Проблемні зони (категорія 2)</th></tr></thead>
-    <tbody>${regions.map((r) => {
+    <tbody>${regions.map((r, i) => {
       const cat1Pct = r.total ? Math.round((r.category1 / r.total) * 1000) / 10 : null;
       const reasons = r.failReasons.length
         ? r.failReasons.map((f) => `${escapeHtml(f.reason)} — ${f.count}`).join(', ')
         : (r.category2 ? '<span class="muted">критерії не задані</span>' : '<span class="muted">—</span>');
       return `
-      <tr>
+      <tr class="row-clickable" data-idx="${i}">
         <td>${escapeHtml(r.region)}</td>
         <td>${fmtNum(r.total)}</td>
         <td>${progressCellHtml(cat1Pct)}</td>
@@ -4191,6 +4226,50 @@ function renderCategoryAnalysisByRegion(regions) {
       </tr>`;
     }).join('') || `<tr><td colspan="5" class="muted">Немає даних</td></tr>`}</tbody>
   `;
+  table.querySelectorAll('tbody tr[data-idx]').forEach((tr) => {
+    const r = regions[Number(tr.dataset.idx)];
+    tr.addEventListener('click', () => openCategoryRegionStoresModal(r));
+  });
+}
+
+async function openCategoryRegionStoresModal(region) {
+  const { categoryReportId, withApprovals } = state.categoryAnalysis;
+  const root = document.getElementById('modal-root');
+  root.innerHTML = `
+    <div class="modal-backdrop" id="ca-stores-backdrop">
+      <div class="modal" style="max-width:680px;">
+        <button class="modal-close" id="ca-stores-close">✕</button>
+        <h2>${escapeHtml(region.region)}</h2>
+        <p class="modal-subtitle">Усього ${fmtNum(region.total)} · Категорія 1 — ${fmtPct(region.total ? Math.round((region.category1 / region.total) * 1000) / 10 : null)}</p>
+        <div class="table-scroll"><table class="data-table" id="ca-stores-table">
+          <tbody><tr><td class="muted">Завантаження…</td></tr></tbody>
+        </table></div>
+      </div>
+    </div>
+  `;
+  document.getElementById('ca-stores-close').onclick = closeModal;
+  document.getElementById('ca-stores-backdrop').addEventListener('click', (e) => {
+    if (e.target.id === 'ca-stores-backdrop') closeModal();
+  });
+  const data = await api(`/api/category-report-by-store?${qs({ categoryReportId, region: region.region, withApprovals: withApprovals ? '1' : '0' })}`);
+  const stores = data.stores || [];
+  const table = document.getElementById('ca-stores-table');
+  if (table) {
+    table.innerHTML = `
+      <thead><tr><th>Магазин</th><th>Усього</th><th>Категорія 1</th><th>Категорія 2</th><th>Середній тест</th></tr></thead>
+      <tbody>${stores.map((s) => {
+        const cat1Pct = s.total ? Math.round((s.category1 / s.total) * 1000) / 10 : null;
+        return `
+        <tr>
+          <td>${escapeHtml(s.store)}</td>
+          <td>${fmtNum(s.total)}</td>
+          <td>${progressCellHtml(cat1Pct)}</td>
+          <td>${fmtNum(s.category2)}</td>
+          <td>${progressCellHtml(s.avgTests)}</td>
+        </tr>`;
+      }).join('') || `<tr><td colspan="5" class="muted">Немає даних</td></tr>`}</tbody>
+    `;
+  }
 }
 
 function renderCategoryAnalysisPeopleTable() {

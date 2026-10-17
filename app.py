@@ -1784,6 +1784,49 @@ def category_report_by_region():
     return jsonify({"regions": regions, "hasCriteria": criteria is not None})
 
 
+@app.get("/api/category-report-by-store")
+def category_report_by_store():
+    """Store breakdown within one region — the drill-down opened from a
+    "По регіонах" row, same shape as category_report_by_region but
+    grouped one level down and scoped to a single region."""
+    category_report_id = request.args.get("categoryReportId")
+    region = request.args.get("region")
+    if not category_report_id or not region:
+        return jsonify({"error": "categoryReportId і region обов'язкові"}), 400
+    with_approvals = request.args.get("withApprovals") == "1"
+    conn = db.get_db()
+    rows = conn.execute(
+        "SELECT * FROM category_report_details WHERE category_report_id=? AND region=? AND store != ''",
+        (category_report_id, region),
+    ).fetchall()
+    conn.close()
+
+    by_store = {}
+    for r in rows:
+        b = by_store.setdefault(r["store"], {
+            "store": r["store"], "total": 0, "category1": 0, "category2": 0,
+            "testsSum": 0.0, "testsCount": 0,
+        })
+        b["total"] += 1
+        effective = _effective_category(r, with_approvals)
+        if effective == 1:
+            b["category1"] += 1
+        elif effective == 2:
+            b["category2"] += 1
+        if r["tests"] is not None:
+            b["testsSum"] += r["tests"]
+            b["testsCount"] += 1
+
+    stores = []
+    for b in by_store.values():
+        stores.append({
+            "store": b["store"], "total": b["total"], "category1": b["category1"], "category2": b["category2"],
+            "avgTests": round(b["testsSum"] / b["testsCount"], 1) if b["testsCount"] else None,
+        })
+    stores.sort(key=lambda s: -(s["category2"] / s["total"] if s["total"] else 0))
+    return jsonify({"stores": stores})
+
+
 @app.get("/api/category-report-people")
 def category_report_people():
     category_report_id = request.args.get("categoryReportId")
