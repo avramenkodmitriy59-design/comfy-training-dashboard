@@ -4170,17 +4170,17 @@ function renderCategoryCriteriaCard(position, criteria) {
   }
   const expanded = !!state.categoryAnalysis.criteriaExpanded;
   const rulesRows = renderRulesTableRows(criteria.rules);
-  const toggleLabel = expanded ? 'Згорнути' : `Показати умови${criteria.rules.length ? ` (${criteria.rules.length})` : ''}`;
+  const toggleLabel = expanded ? 'Згорнути' : 'Розгорнути';
   card.innerHTML = `
     <h3 style="display:flex; align-items:center; flex-wrap:wrap; gap:10px;">
       <span>Умови категоризації — ${escapeHtml(position)}</span>
-      <button class="btn btn-secondary btn-sm" id="ca-criteria-toggle">${toggleLabel}</button>
       <button class="btn btn-secondary btn-sm" id="ca-edit-criteria">Редагувати</button>
     </h3>
-    ${expanded ? `
-      <p style="white-space:pre-wrap; margin:0;">${escapeHtml(criteria.criteriaText)}</p>
-      ${rulesRows ? `<div class="table-scroll"><table class="data-table" style="margin-top:12px;"><thead><tr><th>Критерій</th><th>Умова</th></tr></thead><tbody>${rulesRows}</tbody></table></div>` : ''}
-    ` : ''}
+    <div class="criteria-body${expanded ? '' : ' collapsed'}" id="ca-criteria-body">
+      <p style="white-space:pre-wrap; margin:0 0 10px;">${escapeHtml(criteria.criteriaText)}</p>
+      ${rulesRows ? `<div class="table-scroll"><table class="data-table"><thead><tr><th>Критерій</th><th>Умова</th></tr></thead><tbody>${rulesRows}</tbody></table></div>` : ''}
+    </div>
+    <button class="btn btn-secondary btn-sm" id="ca-criteria-toggle" style="margin-top:10px;">${toggleLabel}</button>
   `;
   document.getElementById('ca-edit-criteria').onclick = () => openCategoryCriteriaModal(position, criteria);
   document.getElementById('ca-criteria-toggle').onclick = () => {

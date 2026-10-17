@@ -476,3 +476,10 @@ table.data-table tr.row-clickable:hover td { background: #f0f2f5; }
 }
 .bottleneck-list li:last-child { border-bottom: none; }
 .bottleneck-list li strong { color: var(--color-red); font-size: 16px; }
+
+.criteria-body.collapsed {
+  max-height: 130px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
+  mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
+}
