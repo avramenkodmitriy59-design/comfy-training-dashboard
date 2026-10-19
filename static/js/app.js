@@ -4391,7 +4391,6 @@ async function openCategoryRegionStoresModal(region) {
     table.innerHTML = `
       <thead><tr>
         <th>Магазин</th><th>Усього</th><th>Категорія 1</th><th>Категорія 2</th><th>Середній тест</th>
-        <th>Сер. помилки в процесах</th><th>Сер. швидкість збору, хв</th><th>Повернення на РЦ</th><th>Неоприбуткований товар</th>
         <th>Проблемні зони</th>
       </tr></thead>
       <tbody>${stores.map((s) => {
@@ -4406,13 +4405,9 @@ async function openCategoryRegionStoresModal(region) {
           <td>${progressCellHtml(cat1Pct)}</td>
           <td>${fmtNum(s.category2)}</td>
           <td>${progressCellHtml(s.avgTests)}</td>
-          <td>${s.avgProcessErrors === null ? '—' : fmtNum(s.avgProcessErrors)}</td>
-          <td>${s.avgPickupSpeed === null ? '—' : fmtNum(s.avgPickupSpeed)}</td>
-          <td>${fmtNum(s.returnsCount)}</td>
-          <td>${fmtNum(s.unaccountedCount)}</td>
           <td>${reasons}</td>
         </tr>`;
-      }).join('') || `<tr><td colspan="10" class="muted">Немає даних</td></tr>`}</tbody>
+      }).join('') || `<tr><td colspan="6" class="muted">Немає даних</td></tr>`}</tbody>
     `;
   }
 }
@@ -4657,15 +4652,19 @@ function regionStats(rows, withApprovals) {
 function storeStats(region, withApprovals) {
   const map = {};
   PEOPLE.filter((p) => p.region === region && p.store).forEach((p) => {
-    const b = map[p.store] || (map[p.store] = { store: p.store, total: 0, category1: 0, category2: 0, testsSum: 0, testsCount: 0 });
+    const b = map[p.store] || (map[p.store] = { store: p.store, total: 0, category1: 0, category2: 0, testsSum: 0, testsCount: 0, failReasons: {} });
     b.total++;
     const eff = effectiveCategory(p, withApprovals);
     if (eff === 1) b.category1++; else if (eff === 2) b.category2++;
     b.testsSum += (p.tests || 0); b.testsCount++;
+    if (p.potentialCategory === 2) {
+      failedCriteria(p).forEach((reason) => { b.failReasons[reason] = (b.failReasons[reason] || 0) + 1; });
+    }
   });
   return Object.values(map).map((b) => ({
     store: b.store, total: b.total, category1: b.category1, category2: b.category2,
     avgTests: b.testsCount ? Math.round(b.testsSum / b.testsCount * 10) / 10 : null,
+    failReasons: Object.entries(b.failReasons).map(([reason, count]) => ({ reason, count })).sort((a, b2) => b2.count - a.count),
   })).sort((a, b) => (b.total ? b.category2 / b.total : 0) - (a.total ? a.category2 / a.total : 0));
 }
 
@@ -4674,15 +4673,16 @@ function openStoreModal(regionRow, withApprovals) {
   const stores = storeStats(regionRow.region, withApprovals);
   const cat1Pct = regionRow.total ? Math.round(regionRow.category1 / regionRow.total * 1000) / 10 : null;
   document.getElementById('x-modal-root').innerHTML =
-    '<div class="modal-backdrop" id="x-store-backdrop"><div class="modal" style="max-width:680px;">' +
+    '<div class="modal-backdrop" id="x-store-backdrop"><div class="modal" style="max-width:860px;">' +
     '<button class="modal-close" id="x-store-close">\\u2715</button>' +
     '<h2>' + esc(regionRow.region) + '</h2>' +
     '<p class="modal-subtitle">Усього ' + fmtNum(regionRow.total) + ' \\u00b7 Категорія 1 \\u2014 ' + fmtPct(cat1Pct) + '</p>' +
-    '<div class="table-scroll"><table class="data-table"><thead><tr><th>Магазин</th><th>Усього</th><th>Категорія 1</th><th>Категорія 2</th><th>Середній тест</th></tr></thead><tbody>' +
+    '<div class="table-scroll"><table class="data-table"><thead><tr><th>Магазин</th><th>Усього</th><th>Категорія 1</th><th>Категорія 2</th><th>Середній тест</th><th>Проблемні зони</th></tr></thead><tbody>' +
     (stores.map((s) => {
       const p1 = s.total ? Math.round(s.category1 / s.total * 1000) / 10 : null;
-      return '<tr><td>' + esc(s.store) + '</td><td>' + fmtNum(s.total) + '</td><td>' + progressCell(p1) + '</td><td>' + fmtNum(s.category2) + '</td><td>' + progressCell(s.avgTests) + '</td></tr>';
-    }).join('') || '<tr><td colspan="5" class="muted">Немає даних</td></tr>') +
+      const reasons = s.failReasons.length ? s.failReasons.map((f) => esc(f.reason) + ' \\u2014 ' + f.count).join(', ') : (s.category2 ? '<span class="muted">критерії не задані</span>' : '<span class="muted">\\u2014</span>');
+      return '<tr><td>' + esc(s.store) + '</td><td>' + fmtNum(s.total) + '</td><td>' + progressCell(p1) + '</td><td>' + fmtNum(s.category2) + '</td><td>' + progressCell(s.avgTests) + '</td><td>' + reasons + '</td></tr>';
+    }).join('') || '<tr><td colspan="6" class="muted">Немає даних</td></tr>') +
     '</tbody></table></div></div></div>';
   document.getElementById('x-store-close').onclick = closeXModal;
   document.getElementById('x-store-backdrop').addEventListener('click', (e) => { if (e.target.id === 'x-store-backdrop') closeXModal(); });

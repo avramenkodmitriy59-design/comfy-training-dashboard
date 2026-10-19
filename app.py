@@ -1902,9 +1902,6 @@ def category_report_by_store():
         b = by_store.setdefault(r["store"], {
             "store": r["store"], "total": 0, "category1": 0, "category2": 0,
             "testsSum": 0.0, "testsCount": 0,
-            "errorsSum": 0.0, "errorsCount": 0,
-            "speedSum": 0.0, "speedCount": 0,
-            "returnsCount": 0, "unaccountedCount": 0,
             "failReasons": {},
         })
         b["total"] += 1
@@ -1915,18 +1912,13 @@ def category_report_by_store():
             b["category2"] += 1
         b["testsSum"] += _tests_value(r)
         b["testsCount"] += 1
-        if r["process_errors"] is not None:
-            b["errorsSum"] += r["process_errors"]
-            b["errorsCount"] += 1
-        if r["pickup_speed_min"] is not None:
-            b["speedSum"] += r["pickup_speed_min"]
-            b["speedCount"] += 1
-        if r["returns_flag"]:
-            b["returnsCount"] += 1
-        if r["unaccounted_flag"]:
-            b["unaccountedCount"] += 1
         # Reasons always reflect the raw calculation, not the toggle — an
-        # approved exception doesn't change what actually failed.
+        # approved exception doesn't change what actually failed. Driven
+        # entirely by this position's own criteria rules (not fixed
+        # columns), same as category_report_by_region — a position with
+        # a completely different metric set (e.g. a merchandiser's "%
+        # утримання обороту") gets its own correct reasons here, not a
+        # storekeeper's unrelated columns.
         if r["potential_category"] == 2:
             for reason in _failed_criteria(r, criteria):
                 b["failReasons"][reason] = b["failReasons"].get(reason, 0) + 1
@@ -1936,9 +1928,6 @@ def category_report_by_store():
         stores.append({
             "store": b["store"], "total": b["total"], "category1": b["category1"], "category2": b["category2"],
             "avgTests": round(b["testsSum"] / b["testsCount"], 1) if b["testsCount"] else None,
-            "avgProcessErrors": round(b["errorsSum"] / b["errorsCount"], 1) if b["errorsCount"] else None,
-            "avgPickupSpeed": round(b["speedSum"] / b["speedCount"], 1) if b["speedCount"] else None,
-            "returnsCount": b["returnsCount"], "unaccountedCount": b["unaccountedCount"],
             "failReasons": sorted(
                 [{"reason": k, "count": v} for k, v in b["failReasons"].items()],
                 key=lambda x: -x["count"],
