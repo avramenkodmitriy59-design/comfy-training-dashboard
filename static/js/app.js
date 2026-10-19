@@ -4094,6 +4094,7 @@ async function refreshCategoryAnalysisData() {
   renderCategoryCriteriaCard(report.position, criteriaResp.criteria);
   renderCategoryAnalysisKpis(summary);
   state._caRegions = byRegion.regions || [];
+  state._caHasCriteria = !!criteriaResp.criteria;
   renderCategoryAnalysisByRegion(state._caRegions);
   renderCategoryBottlenecksCard(state._caRegions, region);
   state._caPeople = people.people || [];
@@ -4340,15 +4341,30 @@ function renderCategoryAnalysisKpis(summary) {
     </div>`).join('');
 }
 
+// Two different reasons a category-2 person can show no fail reason:
+// the position has no criteria configured at all ("критерії не
+// задані", literally true), or criteria ARE configured but none of
+// them are formally violated for these specific people — the real
+// cause (a subjective RC call, something outside the tracked columns)
+// just isn't one of the conditions we check. Conflating the two used to
+// say "критерії не задані" even for positions with criteria filled in,
+// which misled you into thinking nothing was set up.
+function categoryReasonsText(hasCriteria, category2, failReasons) {
+  if (failReasons.length) return failReasons.map((f) => `${escapeHtml(f.reason)} — ${f.count}`).join(', ');
+  if (!category2) return '<span class="muted">—</span>';
+  return hasCriteria
+    ? '<span class="muted" title="Критерії для цієї посади задані, але формально жодну з них не порушено — причина поза списком умов (напр. рішення керівника).">не за заданими критеріями</span>'
+    : '<span class="muted">критерії не задані</span>';
+}
+
 function renderCategoryAnalysisByRegion(regions) {
   const table = document.getElementById('ca-regions-table');
+  const hasCriteria = !!state._caHasCriteria;
   table.innerHTML = `
     <thead><tr><th>Регіон</th><th>Усього</th><th>Категорія 1</th><th>Середній тест</th><th>Проблемні зони (категорія 2)</th></tr></thead>
     <tbody>${regions.map((r, i) => {
       const cat1Pct = r.total ? Math.round((r.category1 / r.total) * 1000) / 10 : null;
-      const reasons = r.failReasons.length
-        ? r.failReasons.map((f) => `${escapeHtml(f.reason)} — ${f.count}`).join(', ')
-        : (r.category2 ? '<span class="muted">критерії не задані</span>' : '<span class="muted">—</span>');
+      const reasons = categoryReasonsText(hasCriteria, r.category2, r.failReasons);
       return `
       <tr class="row-clickable" data-idx="${i}">
         <td>${escapeHtml(r.region)}</td>
@@ -4395,9 +4411,7 @@ async function openCategoryRegionStoresModal(region) {
       </tr></thead>
       <tbody>${stores.map((s) => {
         const cat1Pct = s.total ? Math.round((s.category1 / s.total) * 1000) / 10 : null;
-        const reasons = s.failReasons.length
-          ? s.failReasons.map((f) => `${escapeHtml(f.reason)} — ${f.count}`).join(', ')
-          : (s.category2 ? '<span class="muted">критерії не задані</span>' : '<span class="muted">—</span>');
+        const reasons = categoryReasonsText(!!state._caHasCriteria, s.category2, s.failReasons);
         return `
         <tr>
           <td>${escapeHtml(s.store)}</td>
@@ -4568,6 +4582,13 @@ function ruleOpText(r) {
   return (r.op === 'flagAbsent' || r.op === 'flagPresent') ? label : label + ' ' + r.value;
 }
 function ruleLabel(r) { return r.label || r.metric || ''; }
+function categoryReasonsText(category2, failReasons) {
+  if (failReasons.length) return failReasons.map((f) => esc(f.reason) + ' \\u2014 ' + f.count).join(', ');
+  if (!category2) return '<span class="muted">\\u2014</span>';
+  return RULES.length
+    ? '<span class="muted" title="Критерії для цієї посади задані, але формально жодну з них не порушено \\u2014 причина поза списком умов (напр. рішення керівника).">не за заданими критеріями</span>'
+    : '<span class="muted">критерії не задані</span>';
+}
 
 function metricOf(person, metricKey) {
   if (metricKey === 'Тести') return { raw: person.tests == null ? '' : String(person.tests), value: person.tests };
@@ -4680,7 +4701,7 @@ function openStoreModal(regionRow, withApprovals) {
     '<div class="table-scroll"><table class="data-table"><thead><tr><th>Магазин</th><th>Усього</th><th>Категорія 1</th><th>Категорія 2</th><th>Середній тест</th><th>Проблемні зони</th></tr></thead><tbody>' +
     (stores.map((s) => {
       const p1 = s.total ? Math.round(s.category1 / s.total * 1000) / 10 : null;
-      const reasons = s.failReasons.length ? s.failReasons.map((f) => esc(f.reason) + ' \\u2014 ' + f.count).join(', ') : (s.category2 ? '<span class="muted">критерії не задані</span>' : '<span class="muted">\\u2014</span>');
+      const reasons = categoryReasonsText(s.category2, s.failReasons);
       return '<tr><td>' + esc(s.store) + '</td><td>' + fmtNum(s.total) + '</td><td>' + progressCell(p1) + '</td><td>' + fmtNum(s.category2) + '</td><td>' + progressCell(s.avgTests) + '</td><td>' + reasons + '</td></tr>';
     }).join('') || '<tr><td colspan="6" class="muted">Немає даних</td></tr>') +
     '</tbody></table></div></div></div>';
@@ -4712,7 +4733,7 @@ function renderRegions(regions, withApprovals) {
     '<thead><tr><th>Регіон</th><th>Усього</th><th>Категорія 1</th><th>Середній тест</th><th>Проблемні зони (категорія 2)</th></tr></thead><tbody>' +
     (regions.map((r, i) => {
       const cat1Pct = r.total ? Math.round(r.category1 / r.total * 1000) / 10 : null;
-      const reasonsText = r.failReasons.length ? r.failReasons.map((f) => esc(f.reason) + ' \\u2014 ' + f.count).join(', ') : '<span class="muted">\\u2014</span>';
+      const reasonsText = categoryReasonsText(r.category2, r.failReasons);
       return '<tr class="row-clickable" data-idx="' + i + '"><td>' + esc(r.region) + '</td><td>' + fmtNum(r.total) + '</td><td>' + progressCell(cat1Pct) + '</td><td>' + progressCell(r.avgTests) + '</td><td>' + reasonsText + '</td></tr>';
     }).join('') || '<tr><td colspan="5" class="muted">Немає даних</td></tr>') + '</tbody>';
   document.querySelectorAll('#x-regions tbody tr[data-idx]').forEach((tr) => {
