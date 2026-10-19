@@ -1977,6 +1977,53 @@ def category_report_people():
     } for r in rows]})
 
 
+def _raw_metrics(row):
+    try:
+        return json.loads(row["metrics_json"]) if row["metrics_json"] else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+@app.get("/api/category-report-raw")
+def category_report_raw():
+    """Every row, every raw metric, plus the position's criteria rules —
+    the full self-contained payload for the offline HTML export (same
+    pattern as the lesson report's /raw endpoint): the exported file
+    re-runs the category/fail-reason engine client-side from this, so
+    the region/approvals filters keep working fully offline."""
+    category_report_id = request.args.get("categoryReportId")
+    if not category_report_id:
+        return jsonify({"error": "categoryReportId обов'язковий"}), 400
+    conn = db.get_db()
+    report = conn.execute("SELECT position, period_label FROM category_reports WHERE id=?", (category_report_id,)).fetchone()
+    if not report:
+        conn.close()
+        return jsonify({"error": "Звіт не знайдено"}), 404
+    criteria = _get_criteria(conn, report["position"])
+    rows = conn.execute(
+        "SELECT * FROM category_report_details WHERE category_report_id=? ORDER BY potential_category DESC, tests ASC",
+        (category_report_id,),
+    ).fetchall()
+    conn.close()
+    try:
+        rules = json.loads(criteria["rules_json"]) if criteria and criteria["rules_json"] else []
+    except (TypeError, ValueError):
+        rules = []
+    return jsonify({
+        "position": report["position"], "periodLabel": report["period_label"],
+        "criteriaText": criteria["criteria_text"] if criteria else "",
+        "rules": rules,
+        "people": [{
+            "region": r["region"], "store": r["store"], "name": r["name"],
+            "prevCategory": r["prev_category"], "potentialCategory": r["potential_category"],
+            "rkWish": r["rk_wish"], "rkComment": r["rk_comment"],
+            "tests": _tests_value(r), "confirmed": r["confirmed"],
+            "hireDate": r["hire_date"], "isNewcomer": _is_newcomer(r, report["period_label"]),
+            "metrics": _raw_metrics(r),
+        } for r in rows],
+    })
+
+
 @app.get("/api/category-criteria")
 def get_category_criteria():
     position = request.args.get("position")

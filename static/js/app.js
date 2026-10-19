@@ -3906,6 +3906,7 @@ function renderCategoryAnalysisShell() {
         </div>
       </div>
       <div class="top-actions">
+        <button class="btn btn-secondary btn-sm" id="ca-download-html">Завантажити HTML</button>
         <button class="btn btn-primary btn-sm" id="ca-upload">Завантажити звіт</button>
         <button class="btn btn-secondary btn-sm" id="ca-back">← Назад у систему</button>
       </div>
@@ -3916,6 +3917,7 @@ function renderCategoryAnalysisShell() {
   `;
   document.getElementById('ca-back').onclick = closeCategoryAnalysisView;
   document.getElementById('ca-upload').onclick = openCategoryReportUploadModal;
+  document.getElementById('ca-download-html').onclick = downloadCategoryAnalysisHtml;
 }
 
 function openCategoryReportUploadModal() {
@@ -4449,6 +4451,341 @@ function renderCategoryAnalysisPeopleTable() {
   const pager = document.getElementById('ca-people-pagination');
   pager.innerHTML = paginationBarHtml(key, rows.length);
   wirePagination(pager, key, renderCategoryAnalysisPeopleTable);
+}
+
+// Same self-contained export pattern as the director/lesson reports, but
+// this one also bakes in the position's criteria rules and every raw
+// metric per person, plus a JS port of the fail-reason engine — so the
+// region filter AND the "з/без погоджень" toggle both keep working fully
+// offline, not just a frozen snapshot of today's view.
+async function downloadCategoryAnalysisHtml() {
+  const { categoryReportId, reports } = state.categoryAnalysis;
+  const report = reports.find((r) => r.id === categoryReportId);
+  if (!report) return;
+  const btn = document.getElementById('ca-download-html');
+  if (btn) { btn.disabled = true; btn.textContent = 'Готую файл…'; }
+  try {
+    const [raw, css, logoDataUrl, comfySemiBold, ptRegular, ptMedium, ptBold] = await Promise.all([
+      api(`/api/category-report-raw?${qs({ categoryReportId })}`),
+      fetch('static/css/style.css').then((r) => r.text()).catch(() => ''),
+      fetchAsDataUrl('/static/assets/logo_green.png'),
+      fetchAsDataUrl('/static/fonts/ComfySemiBold/Comfy-Semi-Bold.woff2'),
+      fetchAsDataUrl('/static/fonts/PTRootUI/PT-Root-UI-Regular.woff2'),
+      fetchAsDataUrl('/static/fonts/PTRootUI/PT-Root-UI-Medium.woff2'),
+      fetchAsDataUrl('/static/fonts/PTRootUI/PT-Root-UI-Bold.woff2'),
+    ]);
+    const fontCss = `
+@font-face { font-family: 'Comfy Semi-Bold'; src: url('${comfySemiBold}') format('woff2'); font-weight: 600; font-style: normal; }
+@font-face { font-family: 'PT Root UI'; src: url('${ptRegular}') format('woff2'); font-weight: 400; font-style: normal; }
+@font-face { font-family: 'PT Root UI'; src: url('${ptMedium}') format('woff2'); font-weight: 500; font-style: normal; }
+@font-face { font-family: 'PT Root UI'; src: url('${ptBold}') format('woff2'); font-weight: 700; font-style: normal; }
+`;
+    const inlinedCss = fontCss + css.replace(/@font-face\s*\{[^}]*\}/g, '');
+    const title = `Аналіз категорій — ${report.position}, ${report.periodLabel}`;
+    const dataJson = JSON.stringify(raw).replace(/<\/script/gi, '<\\/script');
+    const html = buildCategoryAnalysisExportHtml({ title, css: inlinedCss, logoDataUrl, dataJson });
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Аналіз категорій - ${report.position} (${report.periodLabel}).html`.replace(/[\\/:*?"<>|]/g, '_');
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    showToast(`Не вдалося згенерувати файл: ${e.message}`, true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Завантажити HTML'; }
+  }
+}
+
+function buildCategoryAnalysisExportHtml({ title, css, logoDataUrl, dataJson }) {
+  return `<!doctype html>
+<html lang="uk"><head><meta charset="utf-8">
+<title>${escapeHtml(title)}</title>
+<style>${css}
+body { background: var(--color-bg); padding: 24px; }
+</style>
+</head><body>
+<noscript><p style="padding:20px;background:#fff2f0;color:#b42318;border-radius:8px;">Цей файл показує дані лише з увімкненим JavaScript — відкрийте його у звичайному браузері (Chrome, Edge, Safari) з дозволеним виконанням скриптів.</p></noscript>
+<div class="top-bar" style="margin-bottom:20px;">
+  <div class="brand">
+    ${logoDataUrl ? `<img class="logo" src="${logoDataUrl}" alt="COMFY">` : ''}
+    <div>
+      <div class="brand-title">${escapeHtml(title)}</div>
+      <div class="brand-subtitle">Знято ${new Date().toLocaleDateString('uk-UA')} · офлайн-знімок, фільтри працюють без інтернету</div>
+    </div>
+  </div>
+</div>
+<div class="filters" id="x-filters">
+  <div class="filter-field">
+    <label>Регіон</label>
+    <select id="x-region"><option value="">Уся мережа</option></select>
+  </div>
+  <div class="filter-field" style="min-width:260px;">
+    <label>Категорія</label>
+    <select id="x-approvals">
+      <option value="0" selected>Розрахована (без погоджень РК)</option>
+      <option value="1">Фінальна (з погодженими побажаннями РК)</option>
+    </select>
+  </div>
+</div>
+<div class="grid-2">
+  <div class="card" id="x-criteria-card"></div>
+  <div class="card" id="x-bottlenecks-card"></div>
+</div>
+<div class="kpi-grid" id="x-kpi"></div>
+<div class="card">
+  <h3>По регіонах</h3>
+  <p class="field-hint">Завжди всі регіони, незалежно від фільтра вище. Клік по регіону — розбивка по магазинах.</p>
+  <div class="table-scroll"><table class="data-table" id="x-regions"></table></div>
+</div>
+<div class="card">
+  <h3>Співробітники</h3>
+  <p class="field-hint" id="x-count-hint"></p>
+  <div class="table-scroll"><table class="data-table" id="x-people"></table></div>
+</div>
+<div id="x-modal-root"></div>
+<script>
+'use strict';
+const DATA = ${dataJson};
+const PEOPLE = DATA.people;
+const RULES = DATA.rules || [];
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function fmtNum(v) { return v === null || v === undefined || Number.isNaN(v) ? '—' : String(v); }
+function fmtPct(v) { return v === null || v === undefined || Number.isNaN(v) ? '—' : (Math.round(v * 10) / 10) + '%'; }
+function bucket(v) {
+  if (v === null || v === undefined || Number.isNaN(v)) return 'red';
+  if (v >= 90) return 'good'; if (v >= 70) return 'yellow'; if (v >= 40) return 'orange'; return 'red';
+}
+function progressCell(v) {
+  const pct = Math.max(0, Math.min(100, v || 0));
+  return '<div class="progress-cell"><div class="progress-bar-track"><div class="progress-bar-fill fill-' + bucket(v) + '" style="width:' + pct + '%"></div></div><div class="value">' + fmtPct(v) + '</div></div>';
+}
+
+const RULE_OP_LABELS = { '>=': 'не менше', '<=': 'не більше', '>': 'більше', '<': 'менше', '==': 'дорівнює', flagAbsent: 'немає позначки', flagPresent: 'є позначка' };
+function ruleOpText(r) {
+  const label = RULE_OP_LABELS[r.op] || r.op;
+  return (r.op === 'flagAbsent' || r.op === 'flagPresent') ? label : label + ' ' + r.value;
+}
+function ruleLabel(r) { return r.label || r.metric || ''; }
+
+function metricOf(person, metricKey) {
+  if (metricKey === 'Тести') return { raw: person.tests == null ? '' : String(person.tests), value: person.tests };
+  return (person.metrics && person.metrics[metricKey]) || { raw: '', value: null };
+}
+function rulePasses(rule, person) {
+  const m = metricOf(person, rule.metric);
+  if (rule.op === 'flagAbsent' || rule.op === 'flagPresent') {
+    const present = (m.value !== null && m.value !== undefined) ? (m.value !== 0) : !!m.raw;
+    return rule.op === 'flagAbsent' ? !present : present;
+  }
+  const val = m.value;
+  if (val === null || val === undefined) return true;
+  const t = rule.value;
+  switch (rule.op) {
+    case '>=': return val >= t;
+    case '<=': return val <= t;
+    case '>': return val > t;
+    case '<': return val < t;
+    case '==': return val === t;
+    default: return true;
+  }
+}
+function failedCriteria(person) {
+  const failed = [];
+  RULES.forEach((entry) => {
+    if (entry.or) {
+      if (!entry.or.some((r) => rulePasses(r, person))) failed.push(entry.or.map(ruleLabel).join(' ЧИ '));
+    } else if (!rulePasses(entry, person)) {
+      failed.push(ruleLabel(entry));
+    }
+  });
+  return failed;
+}
+function effectiveCategory(person, withApprovals) {
+  if (withApprovals && person.confirmed === 'Так' && person.rkWish) {
+    const n = parseFloat(person.rkWish);
+    if (!Number.isNaN(n)) return n;
+  }
+  return person.potentialCategory;
+}
+
+function renderCriteriaCard() {
+  const el = document.getElementById('x-criteria-card');
+  const rulesRows = [];
+  RULES.forEach((entry) => {
+    if (entry.or) {
+      entry.or.forEach((r, j) => {
+        if (j > 0) rulesRows.push('<tr><td colspan="2" class="muted" style="text-align:center;">ЧИ</td></tr>');
+        rulesRows.push('<tr><td>' + esc(ruleLabel(r)) + '</td><td>' + esc(ruleOpText(r)) + '</td></tr>');
+      });
+    } else {
+      rulesRows.push('<tr><td>' + esc(ruleLabel(entry)) + '</td><td>' + esc(ruleOpText(entry)) + '</td></tr>');
+    }
+  });
+  el.innerHTML =
+    '<h3>Умови категоризації — ' + esc(DATA.position) + '</h3>' +
+    '<p style="white-space:pre-wrap; margin:0;">' + esc(DATA.criteriaText) + '</p>' +
+    (rulesRows.length ? '<div class="table-scroll"><table class="data-table" style="margin-top:12px;"><thead><tr><th>Критерій</th><th>Умова</th></tr></thead><tbody>' + rulesRows.join('') + '</tbody></table></div>' : '');
+}
+
+function regionStats(rows, withApprovals) {
+  const map = {};
+  rows.forEach((p) => {
+    if (!p.region) return;
+    const b = map[p.region] || (map[p.region] = { region: p.region, total: 0, category1: 0, category2: 0, testsSum: 0, testsCount: 0, failReasons: {} });
+    b.total++;
+    const eff = effectiveCategory(p, withApprovals);
+    if (eff === 1) b.category1++; else if (eff === 2) b.category2++;
+    b.testsSum += (p.tests || 0); b.testsCount++;
+    if (p.potentialCategory === 2) {
+      failedCriteria(p).forEach((reason) => { b.failReasons[reason] = (b.failReasons[reason] || 0) + 1; });
+    }
+  });
+  return Object.values(map).map((b) => ({
+    region: b.region, total: b.total, category1: b.category1, category2: b.category2,
+    avgTests: b.testsCount ? Math.round(b.testsSum / b.testsCount * 10) / 10 : null,
+    failReasons: Object.entries(b.failReasons).map(([reason, count]) => ({ reason, count })).sort((a, b2) => b2.count - a.count),
+  })).sort((a, b) => (b.total ? b.category2 / b.total : 0) - (a.total ? a.category2 / a.total : 0));
+}
+
+function storeStats(region, withApprovals) {
+  const map = {};
+  PEOPLE.filter((p) => p.region === region && p.store).forEach((p) => {
+    const b = map[p.store] || (map[p.store] = { store: p.store, total: 0, category1: 0, category2: 0, testsSum: 0, testsCount: 0 });
+    b.total++;
+    const eff = effectiveCategory(p, withApprovals);
+    if (eff === 1) b.category1++; else if (eff === 2) b.category2++;
+    b.testsSum += (p.tests || 0); b.testsCount++;
+  });
+  return Object.values(map).map((b) => ({
+    store: b.store, total: b.total, category1: b.category1, category2: b.category2,
+    avgTests: b.testsCount ? Math.round(b.testsSum / b.testsCount * 10) / 10 : null,
+  })).sort((a, b) => (b.total ? b.category2 / b.total : 0) - (a.total ? a.category2 / a.total : 0));
+}
+
+function closeXModal() { document.getElementById('x-modal-root').innerHTML = ''; }
+function openStoreModal(regionRow, withApprovals) {
+  const stores = storeStats(regionRow.region, withApprovals);
+  const cat1Pct = regionRow.total ? Math.round(regionRow.category1 / regionRow.total * 1000) / 10 : null;
+  document.getElementById('x-modal-root').innerHTML =
+    '<div class="modal-backdrop" id="x-store-backdrop"><div class="modal" style="max-width:680px;">' +
+    '<button class="modal-close" id="x-store-close">\\u2715</button>' +
+    '<h2>' + esc(regionRow.region) + '</h2>' +
+    '<p class="modal-subtitle">Усього ' + fmtNum(regionRow.total) + ' \\u00b7 Категорія 1 \\u2014 ' + fmtPct(cat1Pct) + '</p>' +
+    '<div class="table-scroll"><table class="data-table"><thead><tr><th>Магазин</th><th>Усього</th><th>Категорія 1</th><th>Категорія 2</th><th>Середній тест</th></tr></thead><tbody>' +
+    (stores.map((s) => {
+      const p1 = s.total ? Math.round(s.category1 / s.total * 1000) / 10 : null;
+      return '<tr><td>' + esc(s.store) + '</td><td>' + fmtNum(s.total) + '</td><td>' + progressCell(p1) + '</td><td>' + fmtNum(s.category2) + '</td><td>' + progressCell(s.avgTests) + '</td></tr>';
+    }).join('') || '<tr><td colspan="5" class="muted">Немає даних</td></tr>') +
+    '</tbody></table></div></div></div>';
+  document.getElementById('x-store-close').onclick = closeXModal;
+  document.getElementById('x-store-backdrop').addEventListener('click', (e) => { if (e.target.id === 'x-store-backdrop') closeXModal(); });
+}
+
+function renderBottlenecks(regions, selectedRegion) {
+  const el = document.getElementById('x-bottlenecks-card');
+  let reasons, scopeLabel;
+  if (selectedRegion) {
+    const r = regions.find((x) => x.region === selectedRegion);
+    reasons = r ? r.failReasons : [];
+    scopeLabel = esc(selectedRegion);
+  } else {
+    const totals = {};
+    regions.forEach((r) => { r.failReasons.forEach((f) => { totals[f.reason] = (totals[f.reason] || 0) + f.count; }); });
+    reasons = Object.entries(totals).map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count);
+    scopeLabel = 'уся мережа';
+  }
+  el.innerHTML = '<h3>Вузькі місця \\u2014 ' + scopeLabel + '</h3>' +
+    '<p class="field-hint">За якою умовою найчастіше не вистачає до 1 категорії (незалежно від погоджень РК).</p>' +
+    (reasons.length ? '<ul class="bottleneck-list">' + reasons.slice(0, 6).map((f) => '<li><span>' + esc(f.reason) + '</span><strong>' + fmtNum(f.count) + '</strong></li>').join('') + '</ul>'
+      : '<p class="muted">Немає даних.</p>');
+}
+
+function renderRegions(regions, withApprovals) {
+  document.getElementById('x-regions').innerHTML =
+    '<thead><tr><th>Регіон</th><th>Усього</th><th>Категорія 1</th><th>Середній тест</th><th>Проблемні зони (категорія 2)</th></tr></thead><tbody>' +
+    (regions.map((r, i) => {
+      const cat1Pct = r.total ? Math.round(r.category1 / r.total * 1000) / 10 : null;
+      const reasonsText = r.failReasons.length ? r.failReasons.map((f) => esc(f.reason) + ' \\u2014 ' + f.count).join(', ') : '<span class="muted">\\u2014</span>';
+      return '<tr class="row-clickable" data-idx="' + i + '"><td>' + esc(r.region) + '</td><td>' + fmtNum(r.total) + '</td><td>' + progressCell(cat1Pct) + '</td><td>' + progressCell(r.avgTests) + '</td><td>' + reasonsText + '</td></tr>';
+    }).join('') || '<tr><td colspan="5" class="muted">Немає даних</td></tr>') + '</tbody>';
+  document.querySelectorAll('#x-regions tbody tr[data-idx]').forEach((tr) => {
+    const r = regions[Number(tr.dataset.idx)];
+    tr.addEventListener('click', () => openStoreModal(r, withApprovals));
+  });
+}
+
+function renderPeople(rows) {
+  const sorted = [...rows].sort((a, b) => (b.potentialCategory - a.potentialCategory) || ((a.tests || 0) - (b.tests || 0)));
+  document.getElementById('x-people').innerHTML =
+    '<thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Розрахована</th><th>Побажання РК</th><th>Погоджено</th><th>Фінальна</th><th>Тести</th><th>Чому не 1 категорія (розрахунок)</th></tr></thead><tbody>' +
+    (sorted.map((p) => {
+      const confirmedBadge = p.confirmed === 'Так' ? '<span class="badge status-good">Так</span>' : (p.rkWish ? '<span class="badge status-orange">Ні</span>' : '\\u2014');
+      const changed = p._eff !== p.potentialCategory;
+      const newcomerBadge = p.isNewcomer ? ' <span class="badge status-yellow" title="' + (p.hireDate ? 'Прийнятий ' + esc(p.hireDate) : 'Новачок цього кварталу') + '">новачок</span>' : '';
+      const reasons = p._failed.length ? p._failed.map((f) => '<span class="badge status-orange">' + esc(f) + '</span>').join(' ') : '\\u2014';
+      return '<tr><td>' + esc(p.name) + newcomerBadge + '</td><td>' + esc(p.region) + '</td><td>' + esc(p.store) + '</td><td>' + fmtNum(p.potentialCategory) + '</td>' +
+        '<td>' + (p.rkWish ? esc(p.rkWish) + (p.rkComment ? ' <span class="muted" title="' + esc(p.rkComment) + '">(коментар)</span>' : '') : '\\u2014') + '</td>' +
+        '<td>' + confirmedBadge + '</td><td>' + (changed ? '<strong>' + fmtNum(p._eff) + '</strong>' : fmtNum(p._eff)) + '</td>' +
+        '<td>' + progressCell(p.tests) + '</td><td>' + reasons + '</td></tr>';
+    }).join('') || '<tr><td colspan="9" class="muted">Немає даних за цим фільтром</td></tr>') + '</tbody>';
+  document.getElementById('x-count-hint').textContent = 'Показано ' + sorted.length + ' співробітників.';
+}
+
+function renderKpi(rows, withApprovals) {
+  const total = rows.length;
+  const cat1 = rows.filter((p) => p._eff === 1).length;
+  const cat2 = rows.filter((p) => p._eff === 2).length;
+  const testsArr = rows.map((p) => p.tests).filter((v) => v !== null && v !== undefined);
+  const avgTests = testsArr.length ? testsArr.reduce((a, b) => a + b, 0) / testsArr.length : null;
+  const newcomers = rows.filter((p) => p.isNewcomer).length;
+  const cat1Pct = total ? Math.round(cat1 / total * 1000) / 10 : null;
+  const cat2Pct = total ? Math.round(cat2 / total * 1000) / 10 : null;
+  const newcomersPct = total ? Math.round(newcomers / total * 1000) / 10 : null;
+  const tiles = [
+    ['Усього співробітників', fmtNum(total), ''],
+    ['Категорія 1', fmtNum(cat1) + ' (' + fmtPct(cat1Pct) + ')', 'accent-green'],
+    ['Категорія 2', fmtNum(cat2) + ' (' + fmtPct(cat2Pct) + ')', 'accent-red'],
+    ['Середній бал тестів', fmtPct(avgTests), ''],
+    ['Новачки цього кварталу', fmtNum(newcomers) + ' (' + fmtPct(newcomersPct) + ')', 'accent-yellow'],
+  ];
+  document.getElementById('x-kpi').innerHTML = tiles.map((t) =>
+    '<div class="kpi-tile ' + t[2] + '"><div class="kpi-value">' + t[1] + '</div><div class="kpi-label">' + esc(t[0]) + '</div></div>'
+  ).join('');
+}
+
+function render() {
+  const region = document.getElementById('x-region').value;
+  const withApprovals = document.getElementById('x-approvals').value === '1';
+  PEOPLE.forEach((p) => { p._eff = effectiveCategory(p, withApprovals); p._failed = p.potentialCategory === 2 ? failedCriteria(p) : []; });
+  const filtered = region ? PEOPLE.filter((p) => p.region === region) : PEOPLE;
+  const regions = regionStats(PEOPLE, withApprovals);
+  renderKpi(filtered, withApprovals);
+  renderBottlenecks(regions, region);
+  renderRegions(regions, withApprovals);
+  renderPeople(filtered);
+  closeXModal();
+}
+
+function populateFilters() {
+  const regionSelect = document.getElementById('x-region');
+  const regions = [...new Set(PEOPLE.map((p) => p.region).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'uk'));
+  regionSelect.innerHTML = '<option value="">Уся мережа</option>' + regions.map((r) => '<option value="' + esc(r) + '">' + esc(r) + '</option>').join('');
+  regionSelect.addEventListener('change', render);
+  document.getElementById('x-approvals').addEventListener('change', render);
+}
+
+renderCriteriaCard();
+populateFilters();
+render();
+</script>
+</body></html>`;
 }
 
 /* ===================== init ===================== */
