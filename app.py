@@ -1730,9 +1730,12 @@ def _rule_passes(rule, metrics, tests_value):
     one metric every position shares (a fixed column); everything else
     is looked up by its exact column header in that row's metrics_json,
     so the same engine works for any position's differently-shaped file.
-    Missing/unparseable data fails a numeric rule rather than passing it
-    by default — consistent with treating a blank test as 0%, not as
-    "can't tell so let it through"."""
+    A blank/unparseable cell on any metric OTHER than "Тести" passes the
+    rule rather than failing it — a blank error count or blank pickup
+    speed means "not measured", not "proof something's wrong", so it
+    shouldn't count against the person. "Тести" is the one deliberate
+    exception: a blank test is explicitly treated as 0% (tests_value is
+    never None), per an earlier explicit decision for that metric only."""
     metric_key = rule.get("metric", "")
     if metric_key == "Тести":
         m = {"raw": "" if tests_value is None else str(tests_value), "value": tests_value}
@@ -1747,7 +1750,7 @@ def _rule_passes(rule, metrics, tests_value):
         return (not present) if op == "flagAbsent" else present
     val = m.get("value")
     if val is None:
-        return False
+        return True
     fn = _RULE_OPS.get(op)
     if not fn:
         return True
