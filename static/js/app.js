@@ -730,7 +730,12 @@ function detectAttestationPositionClient(rows) {
   if (!entries.length) return { canonical: null, raw: null };
   entries.sort((a, b) => b[1] - a[1]);
   const dominant = entries[0][0];
-  const lower = dominant.toLowerCase();
+  // LMS exports aren't consistent about "Сервіс менеджер" vs "Сервіс-менеджер"
+  // (and similar punctuation drift elsewhere) — a hyphen is treated the same
+  // as a space here so matching doesn't silently break when the export
+  // changes its formatting. Mirrors the same normalization server-side
+  // (aggregate.py's detect_attestation_stream).
+  const lower = dominant.toLowerCase().replace(/-/g, ' ');
   // Director titles matched via startsWith (not includes) so "Заступник керуючого
   // магазином з ..." (a deputy) doesn't false-match on "керуюч".
   const directorPrefixes = ['керуючий магазином', 'в/о керуючого магазином'];
@@ -739,7 +744,7 @@ function detectAttestationPositionClient(rows) {
     ['Товарознавець', ['товарознав']],
     ['Комірник', ['прийому і видачі товару', 'комірник']],
     ['Касир', ['касир']],
-    ['Сервіс менеджер', ['роздрібній торгівлі побутовими товарами', 'сервіс менеджер', 'сервіс-менеджер']],
+    ['Сервіс менеджер', ['роздрібній торгівлі побутовими товарами', 'сервіс менеджер']],
   ];
   for (const [canonical, kws] of rules) {
     if (kws.some((kw) => lower.includes(kw))) return { canonical, raw: dominant };

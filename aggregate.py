@@ -56,7 +56,11 @@ def detect_attestation_stream(rows):
     if not counts:
         return None, None
     dominant = max(counts.items(), key=lambda kv: kv[1])[0]
-    dominant_lower = dominant.lower()
+    # LMS exports aren't consistent about "Сервіс менеджер" vs "Сервіс-менеджер"
+    # (and similar punctuation drift elsewhere) — a hyphen is treated the same
+    # as a space here so the match doesn't silently break when the export
+    # changes its formatting.
+    dominant_lower = dominant.lower().replace("-", " ")
     for canonical, needle in _STREAM_MATCHERS:
         if needle in dominant_lower:
             return canonical, dominant
