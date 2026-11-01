@@ -1118,7 +1118,7 @@ function dashboardShellHtml() {
   const t3 = p ? 'Середній результат ДЗ за посадами' : 'Середня оцінка за посадами';
   const t4 = p ? 'Середній результат ДЗ за регіонами' : 'Середня оцінка за регіонами';
   const t5 = p ? 'Розподіл за результатом тестів' : 'Розподіл за прогресом';
-  const t6 = p ? 'Магазини (від найгіршого результату тестів)' : 'Магазини (від найгіршого прогресу)';
+  const t6 = p ? 'Магазини (від найгіршого результату: тести + ДЗ, 50/50)' : 'Магазини (від найгіршого прогресу)';
   const regionOnlyCard = (title, canvasId, wrapId) => `<div class="card"><h3>${title}</h3><div class="chart-wrap"${wrapId ? ` id="${wrapId}"` : ''}><canvas id="${canvasId}" height="220"></canvas></div></div>`;
   return `
     <div class="last-updated-note" id="last-updated-note"></div>
@@ -1540,9 +1540,14 @@ function renderStoresTable() {
   const secondaryCountField = project ? 'count' : 'scoreCount';
   const rows = Object.entries(state.summary.byStore).map(([store, b]) => ({
     store, region: b.region, primary: avg(b[primaryField], b[primaryCountField]), secondary: avg(b[secondaryField], b[secondaryCountField]),
-    count: b.count, engagement: project && b.testsAssignedSum > 0 ? (b.testsCompletedSum / b.testsAssignedSum) * 100 : null,
+    count: b.count,
   })).filter((r) => r.primary !== null);
-  rows.sort((a, b) => a.primary - b.primary);
+  // Projects rank stores by a 50/50 blend of tests + homework, not tests
+  // alone — a store that aced tests but skipped homework shouldn't look
+  // better than one doing solidly on both. Missing homework counts as 0
+  // for ranking (not shown as 0 — the cell itself still reads "—").
+  const rank = (r) => (project ? ((r.primary ?? 0) + (r.secondary ?? 0)) / 2 : r.primary);
+  rows.sort((a, b) => rank(a) - rank(b));
 
   const primaryLabel = project ? '% тестів' : (scoreOnly ? 'Оцінка' : 'Прогрес');
   const secondaryLabel = project ? '% ДЗ' : 'Оцінка';
@@ -1550,16 +1555,15 @@ function renderStoresTable() {
 
   const table = document.getElementById('stores-table');
   table.innerHTML = `
-    <thead><tr><th>Магазин</th><th>Регіон</th><th>${primaryLabel}</th>${scoreOnly ? '' : `<th>${secondaryLabel}</th>`}${project ? '<th>% залученості</th>' : ''}<th>${peopleLabel}</th></tr></thead>
+    <thead><tr><th>Магазин</th><th>Регіон</th><th>${primaryLabel}</th>${scoreOnly ? '' : `<th>${secondaryLabel}</th>`}<th>${peopleLabel}</th></tr></thead>
     <tbody>${rows.map((r) => `
       <tr>
         <td>${escapeHtml(r.store)}</td>
         <td>${escapeHtml(r.region)}</td>
         <td>${progressCellHtml(r.primary)}</td>
         ${scoreOnly ? '' : `<td>${badgeHtml(r.secondary)}</td>`}
-        ${project ? `<td>${progressCellHtml(r.engagement)}</td>` : ''}
         <td>${r.count}</td>
-      </tr>`).join('') || `<tr><td colspan="${project ? 6 : (scoreOnly ? 4 : 5)}" class="muted">Немає даних для обраних фільтрів</td></tr>`}</tbody>
+      </tr>`).join('') || `<tr><td colspan="${scoreOnly ? 4 : 5}" class="muted">Немає даних для обраних фільтрів</td></tr>`}</tbody>
   `;
 }
 
