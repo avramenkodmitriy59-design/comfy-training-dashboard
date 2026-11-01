@@ -450,18 +450,54 @@ def distribution_aep(rows):
 # shared ID between the two source files, and name spelling/order isn't
 # perfectly consistent between them, so this join is best-effort.
 
-_UA_RU_FOLD = str.maketrans("іїєґ", "иие" "г")
+_UA_RU_FOLD = str.maketrans({"і": "и", "ї": "и", "є": "е", "ґ": "г", "ё": "е"})
+
+# The attendance log sometimes records a name in Latin transliteration
+# (the external training tool's own export) while the roster always has
+# it in Cyrillic — "Podolskyi" vs "Подольський". Transliteration is
+# inherently lossy/ambiguous (no single correct mapping back), so this
+# is a best-effort approximation, not meant to be exact: it only needs
+# to land close enough to the real Cyrillic spelling for the existing
+# ≤2-edit fuzzy matcher (build_roster_matcher) or the lower-confidence
+# suggestion list (suggest_name_matches) to pick it up — a human still
+# confirms any non-exact match there.
+_LATIN_DIGRAPHS = [
+    ("shch", "щ"), ("sch", "щ"),
+    ("zh", "ж"), ("kh", "х"), ("ts", "ц"), ("ch", "ч"), ("sh", "ш"),
+    ("yu", "ю"), ("ya", "я"), ("yi", "ї"), ("ye", "є"), ("yo", "йо"),
+    ("iy", "ій"), ("yy", "ий"), ("ij", "ій"),
+]
+_LATIN_SINGLE = str.maketrans({
+    "a": "а", "b": "б", "v": "в", "h": "г", "g": "ґ", "d": "д", "e": "е",
+    "z": "з", "i": "і", "y": "и", "k": "к", "l": "л", "m": "м", "n": "н",
+    "o": "о", "p": "п", "r": "р", "s": "с", "t": "т", "u": "у", "f": "ф",
+    "c": "к", "j": "й", "w": "в", "x": "кс", "q": "к",
+})
+
+
+def _is_latin_name(s):
+    return bool(re.search(r"[a-z]", s)) and not re.search(r"[а-яіїєґ]", s)
+
+
+def _transliterate_latin(s):
+    for pattern, repl in _LATIN_DIGRAPHS:
+        s = s.replace(pattern, repl)
+    return s.translate(_LATIN_SINGLE)
 
 
 def normalize_person_name(name):
     """Order- and case-insensitive key for matching a person's name across
     the roster and the attendance log (which record it as "Ім'я Прізвище"
-    and "Прізвище Ім'я" respectively, inconsistently). Also folds Ukrainian
-    letters onto their Russian look-alikes (і/ї→и, є→е, ґ→г) — people type
-    the same person's name in whichever keyboard layout they're used to
-    ("Віталій Суфлітін" vs "Виталий Суфлитин"), and without this the two
-    spellings never match."""
-    cleaned = re.sub(r"[^a-zа-яіїєґ\s]", "", str(name or "").lower())
+    and "Прізвище Ім'я" respectively, inconsistently, and sometimes in
+    Latin transliteration instead of Cyrillic — see _transliterate_latin).
+    Also folds Ukrainian/Russian look-alike letters (і/ї/ё→и, є→е, ґ→г) —
+    people type the same person's name in whichever keyboard layout
+    they're used to ("Віталій Суфлітін" vs "Виталий Суфлитин"), and
+    without this the two spellings never match."""
+    raw = str(name or "").strip().lower()
+    if _is_latin_name(raw):
+        raw = _transliterate_latin(raw)
+    cleaned = re.sub(r"[^a-zа-яіїєґё\s]", "", raw)
     cleaned = cleaned.translate(_UA_RU_FOLD)
     return " ".join(sorted(cleaned.split()))
 
