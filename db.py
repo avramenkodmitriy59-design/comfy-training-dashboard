@@ -270,6 +270,7 @@ def init_db():
     crit_cols = [r["name"] for r in conn.execute("PRAGMA table_info(category_criteria)").fetchall()]
     if crit_cols and "rules_json" not in crit_cols:
         conn.execute("ALTER TABLE category_criteria ADD COLUMN rules_json TEXT")
+    _renormalize_aep_names(conn)
     for position, segment, first_line in DEFAULT_POSITIONS:
         conn.execute(
             "INSERT OR IGNORE INTO positions_config (position, segment, first_line, needs_classification) "
@@ -278,6 +279,53 @@ def init_db():
         )
     conn.commit()
     conn.close()
+
+
+def _renormalize_aep_names(conn):
+    """Stored AEP name_norm values are computed once, at upload/merge time.
+    Whenever normalize_person_name changes (e.g. Latin→Cyrillic
+    transliteration, ё→е), older rows keep the old form while new uploads
+    and new merges use the new one — so a confirmed merge silently stops
+    applying and the person "comes back" as unmatched. Recompute every
+    stored norm from its original text on startup; a no-op once in sync."""
+    from aggregate import normalize_person_name
+
+    for r in conn.execute("SELECT id, first_name, last_name, name_norm FROM aep_attendance").fetchall():
+        norm = normalize_person_name(f"{r['first_name'] or ''} {r['last_name'] or ''}")
+        if norm != r["name_norm"]:
+            conn.execute("UPDATE aep_attendance SET name_norm=? WHERE id=?", (norm, r["id"]))
+    for r in conn.execute("SELECT id, name, name_norm FROM aep_roster").fetchall():
+        norm = normalize_person_name(r["name"])
+        if norm != r["name_norm"]:
+            conn.execute("UPDATE aep_roster SET name_norm=? WHERE id=?", (norm, r["id"]))
+    # raw_name_norm is UNIQUE — two old spellings can collapse into one new
+    # norm; keep the first and drop the now-redundant duplicate.
+    for table, cols in (("aep_name_aliases", ("raw", "target")), ("aep_name_dismissals", ("raw",))):
+        select = ", ".join(f"{c}_name, {c}_name_norm" for c in cols)
+        for r in conn.execute(f"SELECT id, {select} FROM {table} ORDER BY id").fetchall():
+            updates = {f"{c}_name_norm": normalize_person_name(r[f"{c}_name"]) for c in cols}
+            if all(updates[k] == r[k] for k in updates):
+                continue
+            try:
+                conn.execute(
+                    f"UPDATE {table} SET " + ", ".join(f"{k}=?" for k in updates) + " WHERE id=?",
+                    (*updates.values(), r["id"]),
+                )
+            except sqlite3.IntegrityError:
+                conn.execute(f"DELETE FROM {table} WHERE id=?", (r["id"],))
+    for r in conn.execute(
+        "SELECT id, name_a, name_norm_a, name_b, name_norm_b FROM aep_roster_dup_dismissals ORDER BY id"
+    ).fetchall():
+        pair = sorted([(normalize_person_name(r["name_a"]), r["name_a"]), (normalize_person_name(r["name_b"]), r["name_b"])])
+        if (pair[0][0], pair[1][0]) == (r["name_norm_a"], r["name_norm_b"]):
+            continue
+        try:
+            conn.execute(
+                "UPDATE aep_roster_dup_dismissals SET name_a=?, name_norm_a=?, name_b=?, name_norm_b=? WHERE id=?",
+                (pair[0][1], pair[0][0], pair[1][1], pair[1][0], r["id"]),
+            )
+        except sqlite3.IntegrityError:
+            conn.execute("DELETE FROM aep_roster_dup_dismissals WHERE id=?", (r["id"],))
 
 
 def row_to_dict(row):

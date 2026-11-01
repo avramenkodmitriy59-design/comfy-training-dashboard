@@ -749,14 +749,25 @@ def aep_name_suggestions():
         return jsonify({"suggestions": []})
 
     matcher = build_roster_matcher(roster, aliases)
+    # The fuzzy fallback inside matcher() is a full linear scan over the
+    # roster — attendance has many rows per person (one per training
+    # session), so running it per ROW instead of per distinct name_norm
+    # redid the same expensive lookup 3-4x over on real data (1218 rows,
+    # 360 distinct names) for no benefit, since every row for the same
+    # person resolves identically either way.
+    seen_norms = set()
     unmatched_by_norm = {}
     for r in attendance:
-        if r["name_norm"] in aliases or r["name_norm"] in dismissed or matcher(r["name_norm"]):
+        name_norm = r["name_norm"]
+        if name_norm in seen_norms:
             continue
-        unmatched_by_norm.setdefault(r["name_norm"], f"{r['first_name']} {r['last_name']}".strip())
+        seen_norms.add(name_norm)
+        if name_norm in aliases or name_norm in dismissed or matcher(name_norm):
+            continue
+        unmatched_by_norm.setdefault(name_norm, f"{r['first_name']} {r['last_name']}".strip())
 
     unmatched = [(display_name, name_norm) for name_norm, display_name in unmatched_by_norm.items()]
-    suggestions = suggest_name_matches(unmatched, roster, population_name_norms=[r["name_norm"] for r in attendance])
+    suggestions = suggest_name_matches(unmatched, roster, population_name_norms=seen_norms)
     return jsonify({"suggestions": suggestions})
 
 

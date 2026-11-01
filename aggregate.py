@@ -5,6 +5,7 @@ as noAssignment so they don't silently drag averages down.
 """
 
 import re
+from functools import lru_cache
 from itertools import permutations
 
 ATTESTATION_STREAMS = ["Директор", "Товарознавець", "Комірник", "Касир", "Сервіс менеджер", "Продавець"]
@@ -516,6 +517,11 @@ def normalize_roster_tier(status):
     return None
 
 
+# Name matching compares the same few hundred tokens/names against each
+# other over and over (every unmatched attendance name x every roster
+# entry, every token alignment) — memoizing keeps /api/aep-name-suggestions
+# fast on real data.
+@lru_cache(maxsize=200_000)
 def _levenshtein(a, b):
     if a == b:
         return 0
@@ -534,6 +540,7 @@ def _levenshtein(a, b):
     return prev[lb]
 
 
+@lru_cache(maxsize=200_000)
 def _token_similarity(a, b):
     """0-100 similarity between two single name tokens (first name OR
     surname — never a whole name). Beyond a plain typo (edit distance),
@@ -617,6 +624,16 @@ _NICKNAME_TO_FULL = {
     "лена": "елена", "наташа": "наталия", "света": "светлана",
     "люда": "людмила", "надя": "надежда", "боря": "борис",
     "слава": "вячеслав",
+    # Ukrainian full forms -> the Russian full form used above, so "Дима
+    # Дегтярёв" (attendance) and "Дмитро Дегтярьов" (roster) fold to the
+    # same first name. Already UA/RU-folded (і->и, є->е), hence "сергий".
+    "дмитро": "дмитрий", "володимир": "владимир", "микола": "николай",
+    "михайло": "михаил", "тетяна": "татьяна", "катерина": "екатерина",
+    "ганна": "анна", "петро": "петр", "сергий": "сергей",
+    "андрий": "андрей", "павло": "павел", "костянтин": "константин",
+    "олена": "елена", "свитлана": "светлана", "надия": "надежда",
+    "олександр": "александр", "олексий": "алексей", "евген": "евгений",
+    "илля": "илья",
 }
 
 
@@ -673,8 +690,9 @@ def build_roster_matcher(roster_rows, aliases=None):
     exact, folded, entries = {}, {}, []
     for r in roster_rows:
         exact.setdefault(r["name_norm"], r)
-        folded.setdefault(_fold_nicknames(r["name_norm"]), r)
-        entries.append(r)
+        f = _fold_nicknames(r["name_norm"])
+        folded.setdefault(f, r)
+        entries.append((r["name_norm"], f, r))
 
     def match(name_norm):
         name_norm = aliases.get(name_norm, name_norm)
@@ -683,11 +701,21 @@ def build_roster_matcher(roster_rows, aliases=None):
         f = _fold_nicknames(name_norm)
         if f in folded:
             return folded[f]
+        # Fuzzy on both the plain and the nickname-folded forms: folded
+        # catches a surname typo plus a nickname/UA-vs-RU first name ("Дима
+        # Дегтярёв" vs "Дмитро Дегтярьов"); plain catches a typo inside the
+        # first name itself ("Ооександр"), which folding can't recognize.
         best, best_dist = None, 3  # threshold: allow up to 2 edits
-        for r in entries:
-            d = _levenshtein(name_norm, r["name_norm"])
-            if d < best_dist:
-                best_dist, best = d, r
+        for r_norm, r_folded, r in entries:
+            for x, y in ((name_norm, r_norm), (f, r_folded)):
+                # Levenshtein distance can never be smaller than the length
+                # difference — skip the O(n*m) computation outright when
+                # that alone already rules the pair out.
+                if abs(len(x) - len(y)) >= best_dist:
+                    continue
+                d = _levenshtein(x, y)
+                if d < best_dist:
+                    best_dist, best = d, r
         return best
 
     return match
@@ -710,18 +738,32 @@ def suggest_name_matches(unmatched, roster_rows, min_similarity=65.0, max_candid
     frequency to tell them apart — most first names there also happen to
     appear only once or twice purely by roster size, not because they're
     actually rare."""
-    distinct_names = {r["name_norm"] for r in roster_rows} | set(population_name_norms or ())
+    # Scored on both plain and nickname-folded forms (see _NICKNAME_TO_FULL),
+    # best of the two: folded so "Дима" vs "Дмитро" counts as the same first
+    # name instead of a 33% match, plain so a typo inside a first name
+    # ("Ооександр") isn't lost by folding.
+    population = {r["name_norm"] for r in roster_rows} | set(population_name_norms or ())
+    distinct_names = population | {_fold_nicknames(n) for n in population}
     token_counts = {}
     for name_norm in distinct_names:
         for t in set(name_norm.split()):
             token_counts[t] = token_counts.get(t, 0) + 1
     rare_tokens = {t for t, c in token_counts.items() if c <= 2}
 
+    roster_folded = [(r["name_norm"], _fold_nicknames(r["name_norm"]), r) for r in roster_rows]
     suggestions = []
     for display_name, name_norm in unmatched:
+        f = _fold_nicknames(name_norm)
         scored = [
-            (name_similarity_percent(name_norm, r["name_norm"], rare_tokens), r)
-            for r in roster_rows
+            (max(
+                name_similarity_percent(name_norm, r_norm, rare_tokens),
+                # folded only token-for-token: with an extra token ("Од1")
+                # the whole-string fallback would match on the shared,
+                # now-identical first name alone
+                name_similarity_percent(f, r_folded, rare_tokens)
+                if (f, r_folded) != (name_norm, r_norm) and f.count(" ") == r_folded.count(" ") else 0.0,
+            ), r)
+            for r_norm, r_folded, r in roster_folded
         ]
         scored = [(sim, r) for sim, r in scored if sim >= min_similarity]
         if not scored:
