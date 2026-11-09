@@ -17,7 +17,9 @@ Stdlib only (urllib), so the compiled production build needs no new deps.
 
 import base64
 import json
+import os
 import re
+import ssl
 import urllib.error
 import urllib.request
 from http.cookiejar import CookieJar
@@ -25,6 +27,21 @@ from http.cookiejar import CookieJar
 FEED_BASE_URL = "https://elearning.comfy.ua/"
 USER_AGENT = "COMFY-training-dashboard/1.0 (+hr-board.comfy.ua)"
 TIMEOUT = 60
+
+
+def _ssl_context():
+    """Default HTTPS verification, plus the system CA bundle loaded
+    explicitly when Python found none on its own — the production image is a
+    PyInstaller/staticx single binary on a minimal base where the bundled
+    OpenSSL's default paths may not exist, but the image does ship
+    /etc/ssl/certs/ca-certificates.crt (see tpl.dockerfile)."""
+    ctx = ssl.create_default_context()
+    if not ctx.cert_store_stats().get("x509_ca"):
+        for path in (os.environ.get("SSL_CERT_FILE"), "/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem"):
+            if path and os.path.isfile(path):
+                ctx.load_verify_locations(cafile=path)
+                break
+    return ctx
 
 
 class FeedError(Exception):
@@ -36,7 +53,10 @@ class FeedClient:
     def __init__(self, base_url=FEED_BASE_URL):
         self.base_url = base_url
         self.api_url = base_url + "source/"
-        self._opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
+        self._opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(CookieJar()),
+            urllib.request.HTTPSHandler(context=_ssl_context()),
+        )
         self._basic = None
 
     def _request(self, url, body=None, headers=None):
@@ -47,7 +67,8 @@ class FeedClient:
         except urllib.error.HTTPError as e:
             raise FeedError(f"Feed відповів помилкою {e.code}") from e
         except (urllib.error.URLError, TimeoutError, OSError) as e:
-            raise FeedError("Не вдалося з'єднатися з Feed (elearning.comfy.ua)") from e
+            reason = getattr(e, "reason", None) or e
+            raise FeedError(f"Не вдалося з'єднатися з Feed (elearning.comfy.ua): {reason}") from e
 
     def _app_basic_auth(self):
         if self._basic is None:
