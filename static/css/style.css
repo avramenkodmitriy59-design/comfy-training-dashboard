@@ -174,7 +174,11 @@ a { color: var(--color-green-dark); }
 .brand-title { font-family: var(--font-heading); font-size: 17px; color: var(--color-graphite-dark); }
 .brand-subtitle { font-size: 12px; color: var(--color-muted); }
 
-.top-actions { display: flex; gap: 10px; align-items: center; }
+/* Same buttons on every tab; a label never wraps inside its button — the
+   row wraps whole buttons instead when it runs out of width. */
+.top-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.top-actions .btn { white-space: nowrap; }
+.top-actions .btn-primary { border: 1px solid transparent; } /* same height as the bordered secondary buttons */
 
 /* ---------- Tabs ---------- */
 
@@ -361,6 +365,10 @@ table.data-table tr.row-clickable:hover td { background: #f0f2f5; }
 
 .badge {
   display: inline-block;
+  /* fixed width so a column of "42%" / "89.8%" / "100%" lines up */
+  min-width: 54px;
+  text-align: center;
+  box-sizing: border-box;
   padding: 3px 9px;
   border-radius: 999px;
   font-size: 12px;
@@ -403,7 +411,7 @@ table.data-table tr.row-clickable:hover td { background: #f0f2f5; }
 .modal .modal-subtitle { color: var(--color-muted); font-size: 13px; margin-bottom: 18px; }
 .field-group { margin-bottom: 16px; }
 .field-group label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; color: var(--color-graphite-dark); }
-.field-group input[type="text"], .field-group input[type="file"] {
+.field-group input[type="text"], .field-group input[type="password"], .field-group input[type="file"] {
   width: 100%;
   padding: 10px 12px;
   border: 1px solid var(--color-border);
@@ -483,3 +491,27 @@ table.data-table tr.row-clickable:hover td { background: #f0f2f5; }
   -webkit-mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
   mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
 }
+
+/* "Результати по темах": rows act as a topic filter toggle */
+.data-table tr.clickable-row { cursor: pointer; }
+.data-table tr.clickable-row:hover td { background: var(--color-bg); }
+.data-table tr.selected-row td { background: var(--color-bg); font-weight: 600; }
+
+/* "Стажери": internship result */
+.status-pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; white-space: nowrap; }
+.status-pill.success { background: #e3f6df; color: var(--color-green-dark); }
+.status-pill.fail { background: #fde4e2; color: var(--color-red); }
+.status-pill.pending { background: var(--color-bg); color: var(--color-muted); }
+.status-pill.dismissed { background: var(--color-bg); color: var(--color-muted); white-space: normal; }
+
+/* KPI page */
+.kpi-role-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.kpi-role-index { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+.kpi-own { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; font-size: 13px; margin-bottom: 10px; }
+.kpi-own label { display: inline-flex; gap: 4px; align-items: center; }
+.kpi-table td { vertical-align: top; }
+.kpi-table td .muted { font-size: 12px; margin-top: 2px; }
+.kpi-manual { display: flex; flex-direction: column; gap: 6px; min-width: 170px; }
+.kpi-manual label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--color-muted); }
+.kpi-manual input { padding: 6px 8px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); width: 120px; }
+.kpi-manual .kpi-save { align-self: flex-start; }

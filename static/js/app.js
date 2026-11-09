@@ -3,6 +3,7 @@
 /* ===================== constants ===================== */
 
 const ATTESTATION_STREAMS = ['Директор', 'Товарознавець', 'Комірник', 'Касир', 'Сервіс менеджер', 'Продавець'];
+const ATTESTATION_ALL = '__all__';
 
 // These small leadership-track courses have a couple dozen people spread
 // thin across positions and stores (mostly 1 person per store) — a
@@ -804,11 +805,10 @@ async function bootstrap() {
 async function loadStreams() {
   const data = await api('/api/streams');
   state.streams = data.streams;
-  if (!state.attestationPosition) {
-    const available = ATTESTATION_STREAMS.filter((p) =>
-      state.streams.some((s) => s.streamType === 'attestation' && s.streamKey === p));
-    state.attestationPosition = available[0] || ATTESTATION_STREAMS[0];
-  }
+  // Attestation opens on "Усі посади" — every position's report merged
+  // (see _resolve_scope on the server); a single position is picked from
+  // the "Посада" filter.
+  if (!state.attestationPosition) state.attestationPosition = ATTESTATION_ALL;
   state.projects = data.projects || [];
   if (!state.selectedProject || !state.projects.includes(state.selectedProject)) {
     state.selectedProject = state.projects[0] || null;
@@ -874,27 +874,11 @@ function bindTabs() {
 }
 
 function renderPositionSwitch() {
-  const reportBtn = document.getElementById('btn-director-report');
-  if (reportBtn) reportBtn.hidden = state.tab !== 'overall';
-  const lessonReportBtn = document.getElementById('btn-lesson-report');
-  if (lessonReportBtn) lessonReportBtn.hidden = state.tab !== 'overall';
-  const categoryAnalysisBtn = document.getElementById('btn-category-analysis');
-  if (categoryAnalysisBtn) categoryAnalysisBtn.hidden = state.tab !== 'overall';
   const el = document.getElementById('position-switch');
   if (state.tab === 'attestation') {
-    el.hidden = false;
-    el.innerHTML = ATTESTATION_STREAMS.map((p) => {
-      const has = streamHasData('attestation', p);
-      return `<button class="position-chip ${p === state.attestationPosition ? 'active' : ''}" data-pos="${escapeHtml(p)}" ${has ? '' : 'style="opacity:.45"'}>${escapeHtml(p)}${has ? '' : ' · немає даних'}</button>`;
-    }).join('');
-    el.querySelectorAll('.position-chip').forEach((chip) => {
-      chip.addEventListener('click', async () => {
-        state.attestationPosition = chip.dataset.pos;
-        renderPositionSwitch();
-        resetFilters();
-        await refreshAll();
-      });
-    });
+    // position is picked in the filters bar (see #f-att-position)
+    el.hidden = true;
+    el.innerHTML = '';
     return;
   }
 
@@ -936,7 +920,7 @@ function renderPositionSwitch() {
 }
 
 function resetFilters() {
-  state.filters = { region: '', store: '', position: '', segment: 'all', firstLine: 'all', search: '' };
+  state.filters = { region: '', store: '', position: '', topic: '', segment: 'all', firstLine: 'all', search: '' };
   state.sort = { col: isProjectStream() ? 'testsPercent' : 'progress', dir: 'asc' };
   state.selectedPeriodId = null;
   state.aepTierFilter = '';
@@ -956,6 +940,8 @@ function resolveSelectedPeriod() {
 /* ===================== data refresh ===================== */
 
 async function refreshAll() {
+  if (state.tab === 'trainees') { await renderTraineesView(); return; }
+  if (state.tab === 'kpi') { await renderKpiView(); return; }
   const { streamType, streamKey } = currentStream();
   const contentArea = document.getElementById('content-area');
 
@@ -988,6 +974,7 @@ function reconcileFiltersWithOptions() {
   const f = state.filters;
   if (f.region && !opts.regions.includes(f.region)) f.region = '';
   if (f.position && !opts.positions.includes(f.position)) f.position = '';
+  if (f.topic && !(opts.topics || []).includes(f.topic)) f.topic = '';
   const validStores = f.region ? (opts.storesByRegion[f.region] || []) : Object.values(opts.storesByRegion).flat();
   if (f.store && !validStores.includes(f.store)) f.store = '';
 }
@@ -1015,6 +1002,7 @@ async function refreshSummary() {
   }
   renderDistributionChart();
   renderStoresTable();
+  await refreshTopicsTable();
 }
 
 async function fetchPeriods() {
@@ -1046,7 +1034,7 @@ async function refreshCurrentPeriodView() {
 function filterParams() {
   const f = state.filters;
   return {
-    region: f.region, store: f.store, position: f.position,
+    region: f.region, store: f.store, position: f.position, topic: f.topic,
     segment: f.segment !== 'all' ? f.segment : '',
     firstLine: f.firstLine !== 'all' ? f.firstLine : '',
   };
@@ -1056,7 +1044,7 @@ function filterParams() {
 
 function emptyStateHtml() {
   let label = 'загальні дані';
-  if (state.tab === 'attestation') label = `дані з атестації (${state.attestationPosition})`;
+  if (state.tab === 'attestation') label = `дані з атестації (${state.attestationPosition === ATTESTATION_ALL ? 'усі посади' : state.attestationPosition})`;
   if (state.tab === 'project') {
     label = isAepStream() ? 'AEP' : (state.selectedProject ? `проєкт «${state.selectedProject}»` : 'проєкти');
   }
@@ -1155,6 +1143,12 @@ function dashboardShellHtml() {
       <div class="card"><h3>${t5}</h3><div class="chart-wrap" id="chart-distribution-wrap"><canvas id="chart-distribution" height="220"></canvas></div></div>
       <div class="card"><h3>Динаміка по періодах</h3><div class="chart-wrap"><canvas id="chart-trend" height="220"></canvas></div></div>
     </div>`}
+    ${p || hideProgress ? '' : `
+    <div class="card" id="topics-card" hidden>
+      <h3>Результати по темах</h3>
+      <div class="table-scroll"><table class="data-table" id="topics-table"></table></div>
+      <div class="table-note">Натисніть на тему, щоб відфільтрувати по ній увесь дашборд.</div>
+    </div>`}
     ${isSparseProject ? '' : `
     <div class="card">
       <h3>${hideProgress ? 'Магазини (від найгіршої оцінки)' : t6}</h3>
@@ -1226,10 +1220,20 @@ function renderFiltersBar() {
       <label>${storeLabel}</label>
       <select id="f-store"><option value="">${storeAllLabel}</option>${[...new Set(stores)].sort().map((s) => `<option value="${escapeHtml(s)}" ${s === f.store ? 'selected' : ''}>${escapeHtml(s)}</option>`).join('')}</select>
     </div>
+    ${state.tab === 'attestation' ? `
+    <div class="filter-field">
+      <label>Посада</label>
+      <select id="f-att-position"><option value="">Усі посади</option>${ATTESTATION_STREAMS.filter((p) => streamHasData('attestation', p)).map((p) => `<option value="${escapeHtml(p)}" ${p === state.attestationPosition ? 'selected' : ''}>${escapeHtml(p)}</option>`).join('')}</select>
+    </div>` : `
     <div class="filter-field">
       <label>${positionLabel}</label>
       <select id="f-position"><option value="">${positionAllLabel}</option>${opts.positions.map((p) => `<option value="${escapeHtml(p)}" ${p === f.position ? 'selected' : ''}>${escapeHtml(p)}</option>`).join('')}</select>
-    </div>
+    </div>`}
+    ${aep || isProjectStream() || !(opts.topics || []).length ? '' : `
+    <div class="filter-field">
+      <label>Тема</label>
+      <select id="f-topic"><option value="">Усі теми</option>${opts.topics.map((t) => `<option value="${escapeHtml(t)}" ${t === f.topic ? 'selected' : ''}>${escapeHtml(t)}</option>`).join('')}</select>
+    </div>`}
     ${(aep || isSparseProject) ? '' : `
     <div class="filter-field">
       <label>Сегмент</label>
@@ -1275,8 +1279,23 @@ function renderFiltersBar() {
   document.getElementById('f-store').addEventListener('change', async (e) => {
     state.filters.store = e.target.value; await refreshSummary(); await refreshDetails();
   });
-  document.getElementById('f-position').addEventListener('change', async (e) => {
+  document.getElementById('f-position')?.addEventListener('change', async (e) => {
     state.filters.position = e.target.value; await refreshSummary(); await refreshDetails();
+  });
+  document.getElementById('f-att-position')?.addEventListener('change', async (e) => {
+    // Each position is its own stream (own period ids) — switch stream but
+    // stay on the same quarter and keep region / store.
+    const label = resolveSelectedPeriod()?.label;
+    const { region, store } = state.filters;
+    state.attestationPosition = e.target.value || ATTESTATION_ALL;
+    resetFilters();
+    Object.assign(state.filters, { region, store });
+    await fetchPeriods();
+    state.selectedPeriodId = state.periods.find((p) => p.label === label)?.id ?? null;
+    await refreshAll();
+  });
+  document.getElementById('f-topic')?.addEventListener('change', async (e) => {
+    state.filters.topic = e.target.value; await refreshSummary(); await refreshDetails();
   });
   document.getElementById('f-segment')?.addEventListener('change', async (e) => {
     state.filters.segment = e.target.value; await refreshSummary(); await refreshDetails();
@@ -1351,21 +1370,25 @@ function renderKPIs() {
   } else if (isProdavetsAttestation()) {
     // No real assigned/completed/progress data for this stream (see
     // isProdavetsAttestation) — score is the only honest number here.
-    const totalPeople = t.count + t.noAssignment;
+    // "Not started" here = no attestation mark yet this quarter (see
+    // fetch_sellers_report) — so engagement is the share that has one.
+    const totalPeople = t.count + t.noAssignment + (t.scoreOnly || 0);
     tiles = [
       { label: 'Середня оцінка', value: fmtPct(avg(t.scoreSum, t.scoreCount)), accent: 'green' },
+      { label: 'Залученість', value: fmtPct(avg((t.count - t.notStarted) * 100, t.count)), accent: 'green' },
       { label: 'Співробітників у вибірці', value: fmtNum(totalPeople), accent: '' },
+      { label: 'Ще не розпочали', value: fmtNum(t.notStarted), accent: 'red' },
     ];
   } else {
-    const totalPeople = t.count + t.noAssignment;
+    const totalPeople = t.count + t.noAssignment + (t.scoreOnly || 0);
     tiles = [
       { label: 'Середній прогрес', value: fmtPct(avg(t.progressSum, t.count)), accent: 'green' },
       { label: 'Середня оцінка', value: fmtPct(avg(t.scoreSum, t.scoreCount)), accent: 'green' },
       { label: 'Співробітників у вибірці', value: fmtNum(totalPeople), accent: '' },
       { label: 'Ще не розпочали', value: fmtNum(t.notStarted), accent: 'red' },
       { label: 'Без призначеного навчання', value: fmtNum(t.noAssignment), accent: 'muted' },
-      { label: 'Призначено курсів', value: fmtNum(t.assigned), accent: '' },
-      { label: 'Пройдено курсів', value: fmtNum(t.completed), accent: '' },
+      { label: 'Призначено занять', value: fmtNum(t.assigned), accent: '' },
+      { label: 'Пройдено занять', value: fmtNum(t.completed), accent: '' },
     ];
   }
   const grid = document.getElementById('kpi-grid');
@@ -1565,6 +1588,39 @@ function renderStoresTable() {
         <td>${r.count}</td>
       </tr>`).join('') || `<tr><td colspan="${scoreOnly ? 4 : 5}" class="muted">Немає даних для обраних фільтрів</td></tr>`}</tbody>
   `;
+}
+
+// "Результати по темах" — per-topic totals for Feed-synced periods (see
+// /api/topics), under every filter except the topic itself; clicking a row
+// toggles the topic filter for the whole dashboard.
+async function refreshTopicsTable() {
+  const card = document.getElementById('topics-card');
+  if (!card) return;
+  if (!(state._filterOptions?.topics || []).length) { card.hidden = true; return; }
+  const { streamType, streamKey } = currentStream();
+  const periodId = resolveSelectedPeriod()?.id || '';
+  const { topic, ...params } = filterParams();
+  const data = await api(`/api/topics?${qs({ streamType, streamKey, periodId, ...params })}`);
+  card.hidden = !data.topics.length;
+  const table = document.getElementById('topics-table');
+  table.innerHTML = `
+    <thead><tr><th>Тема</th><th>Призначено</th><th>Пройшли</th><th>% проходження</th><th>Середня оцінка</th></tr></thead>
+    <tbody>${data.topics.map((t) => `
+      <tr class="clickable-row${t.topic === state.filters.topic ? ' selected-row' : ''}" data-topic="${escapeHtml(t.topic)}">
+        <td>${escapeHtml(t.topic)}</td>
+        <td>${fmtNum(t.assigned)}</td>
+        <td>${fmtNum(t.completed)}</td>
+        <td>${progressCellHtml(t.completionPct)}</td>
+        <td>${t.avgScore !== null ? badgeHtml(t.avgScore) : '<span class="muted">без тесту</span>'}</td>
+      </tr>`).join('')}</tbody>
+  `;
+  table.querySelectorAll('tr[data-topic]').forEach((tr) => {
+    tr.addEventListener('click', async () => {
+      state.filters.topic = state.filters.topic === tr.dataset.topic ? '' : tr.dataset.topic;
+      renderFiltersBar();
+      await refreshSummary(); await refreshDetails();
+    });
+  });
 }
 
 function fmtAepDate(iso) {
@@ -2025,6 +2081,23 @@ const PROJECT_EMPLOYEE_COLUMNS = [
   { key: 'homeworkPercent', label: '% ДЗ' },
 ];
 
+// With a topic selected (see /api/details?topic=): one row per person for
+// that topic — passed or not, its mark, and when.
+const TOPIC_EMPLOYEE_COLUMNS = [
+  { key: 'region', label: 'Регіон' },
+  { key: 'store', label: 'Магазин' },
+  { key: 'position', label: 'Посада' },
+  { key: 'name', label: 'ПІБ' },
+  { key: 'completed', label: 'Пройдено' },
+  { key: 'score', label: 'Оцінка' },
+  { key: 'doneAt', label: 'Дата проходження' },
+];
+
+function fmtFeedDate(s) {
+  const m = String(s || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[3]}.${m[2]}.${m[1]}` : '';
+}
+
 const ATTESTATION_SCORE_ONLY_COLUMNS = [
   { key: 'region', label: 'Регіон' },
   { key: 'store', label: 'Магазин' },
@@ -2038,10 +2111,24 @@ function renderEmployeesTable() {
   const { rows, total, shown } = state.details;
   const project = isProjectStream();
   const scoreOnly = !project && isProdavetsAttestation();
-  const columns = project ? PROJECT_EMPLOYEE_COLUMNS : (scoreOnly ? ATTESTATION_SCORE_ONLY_COLUMNS : EMPLOYEE_COLUMNS);
+  const byTopic = !project && !scoreOnly && !!state.filters.topic;
+  const columns = project ? PROJECT_EMPLOYEE_COLUMNS
+    : scoreOnly ? ATTESTATION_SCORE_ONLY_COLUMNS
+    : byTopic ? TOPIC_EMPLOYEE_COLUMNS : EMPLOYEE_COLUMNS;
   const pageRows = pageSlice('employees', rows);
 
-  const bodyHtml = project
+  const bodyHtml = byTopic
+    ? pageRows.map((r) => `
+      <tr>
+        <td>${escapeHtml(r.region)}</td>
+        <td>${escapeHtml(r.store)}</td>
+        <td>${escapeHtml(r.position)}</td>
+        <td>${escapeHtml(r.name)}</td>
+        <td>${r.completed > 0 ? 'Так' : '<span class="muted">Ні</span>'}</td>
+        <td>${r.score !== null && r.score !== undefined ? badgeHtml(r.score) : '<span class="muted">—</span>'}</td>
+        <td>${fmtFeedDate(r.doneAt) || '<span class="muted">—</span>'}</td>
+      </tr>`).join('')
+    : project
     ? pageRows.map((r) => `
       <tr>
         <td>${escapeHtml(r.region)}</td>
@@ -2067,10 +2154,10 @@ function renderEmployeesTable() {
         <td>${escapeHtml(r.store)}</td>
         <td>${escapeHtml(r.position)}</td>
         <td>${escapeHtml(r.name)}</td>
-        <td>${fmtNum(r.assigned)}</td>
-        <td>${fmtNum(r.completed)}</td>
-        <td>${progressCellHtml(r.assigned > 0 ? r.progress : null)}</td>
-        <td>${r.assigned > 0 ? badgeHtml(r.score) : '<span class="muted">—</span>'}</td>
+        <td>${r.scoreOnly ? '<span class="muted">—</span>' : fmtNum(r.assigned)}</td>
+        <td>${r.scoreOnly ? '<span class="muted">—</span>' : fmtNum(r.completed)}</td>
+        <td>${progressCellHtml(r.assigned > 0 && !r.scoreOnly ? r.progress : null)}</td>
+        <td>${r.scoreOnly ? (r.progress > 0 ? badgeHtml(r.score) : '<span class="muted">—</span>') : r.assigned > 0 ? badgeHtml(r.score) : '<span class="muted">—</span>'}</td>
       </tr>`).join('');
 
   const emptyLabel = 'Немає співробітників для обраних фільтрів';
@@ -2108,6 +2195,12 @@ function fmtUploadedAt(iso) {
 }
 
 function lastUpdatedFor(streamType, streamKey) {
+  if (streamType === 'attestation' && streamKey === ATTESTATION_ALL) {
+    // "Усі посади": the most recent update across every position
+    const latest = state.streams.filter((x) => x.streamType === 'attestation')
+      .map((x) => x.lastUpdated).filter(Boolean).sort().pop();
+    return latest ? fmtUploadedAt(latest) : null;
+  }
   const s = state.streams.find((x) => x.streamType === streamType && x.streamKey === streamKey);
   return s ? fmtUploadedAt(s.lastUpdated) : null;
 }
@@ -2468,6 +2561,473 @@ async function handleSaveUpload() {
     btn.disabled = false;
     btn.textContent = 'Зберегти';
   }
+}
+
+/* ===================== Feed sync modal ===================== */
+
+// Pulls attestation / "Все навчання" reports straight from Comfy Feed with the operator's own
+// Feed login (see /api/feed-sync). The password goes to our server for that
+// one request only — nothing here stores it (no localStorage, no state).
+const FEED_ATT_TYPE_LABELS = {
+  dir: 'Директори', tv: 'Товарознавці', klad: 'Комірники', kass: 'Касири', sm: 'Сервіс-менеджери', prod: 'Продавці', sellers: 'Продавці',
+};
+
+function openFeedSyncModal() {
+  const root = document.getElementById('modal-root');
+  const now = new Date();
+  const currentQuarter = Math.floor(now.getMonth() / 3) + 1;
+  const currentYear = now.getFullYear();
+  root.innerHTML = `
+    <div class="modal-backdrop" id="feed-backdrop">
+      <div class="modal" style="max-width:480px;">
+        <button class="modal-close" id="feed-close">✕</button>
+        <h2>Оновити з Feed</h2>
+        <p class="modal-subtitle">Звіти підтягнуться напряму з Feed — ті самі дані, що й «Звіт по заняттях» в Excel. Пароль використовується лише для цього оновлення й ніде не зберігається.</p>
+        <form id="feed-form" autocomplete="on">
+          <div class="field-group">
+            <label for="feed-login">Логін Feed</label>
+            <input type="text" id="feed-login" name="username" autocomplete="username" required>
+          </div>
+          <div class="field-group">
+            <label for="feed-password">Пароль Feed</label>
+            <input type="password" id="feed-password" name="password" autocomplete="current-password" required>
+          </div>
+          <div class="field-group">
+            <label>Що оновити</label>
+            <label style="display:flex; gap:8px; align-items:center; font-weight:normal;"><input type="checkbox" id="feed-r-attestation" checked> Атестація (директори, товарознавці, комірники, касири, СМ)</label>
+            <label style="display:flex; gap:8px; align-items:center; font-weight:normal;"><input type="checkbox" id="feed-r-sellers" checked> Атестація продавців («Звіт з АТТ»)</label>
+            <label style="display:flex; gap:8px; align-items:center; font-weight:normal;"><input type="checkbox" id="feed-r-overall" checked> Все навчання</label>
+            <label style="display:flex; gap:8px; align-items:center; font-weight:normal;"><input type="checkbox" id="feed-r-trainees"> Стажери («Премія за наставництво», 3 місяці кварталу)</label>
+            <div class="field-hint">«Все навчання» й продавців Feed віддає лише за поточний або попередній квартал. Все навчання: ${lastUpdatedFor('overall', 'overall') || 'немає даних'}.</div>
+          </div>
+          <div class="field-group">
+            <label>Період</label>
+            <div style="display:flex; gap:8px;">
+              <select id="feed-quarter">
+                ${[1, 2, 3, 4].map((q) => `<option value="${q}" ${q === currentQuarter ? 'selected' : ''}>${q} квартал</option>`).join('')}
+              </select>
+              <input type="number" id="feed-year" value="${currentYear}" style="width:100px;">
+            </div>
+            <div class="field-hint">Дані за цей квартал ЗАМІНЯТЬ уже завантажені (як і при ручному завантаженні). Атестація — ${ATTESTATION_STREAMS.map((p) => `${escapeHtml(p)}: ${lastUpdatedFor('attestation', p) || 'немає даних'}`).join(' · ')}</div>
+          </div>
+          <div id="feed-result"></div>
+          <div id="feed-error" class="error-text"></div>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-secondary" id="feed-cancel">Скасувати</button>
+            <button type="submit" class="btn btn-primary" id="feed-submit">Оновити</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `;
+  document.getElementById('feed-close').onclick = closeModal;
+  document.getElementById('feed-cancel').onclick = closeModal;
+  document.getElementById('feed-backdrop').addEventListener('click', (e) => {
+    if (e.target.id === 'feed-backdrop') closeModal();
+  });
+  document.getElementById('feed-form').addEventListener('submit', (e) => { e.preventDefault(); handleFeedSync(); });
+  document.getElementById('feed-login').focus();
+}
+
+async function handleFeedSync() {
+  const btn = document.getElementById('feed-submit');
+  const errorEl = document.getElementById('feed-error');
+  const resultEl = document.getElementById('feed-result');
+  const passwordEl = document.getElementById('feed-password');
+  errorEl.textContent = '';
+  resultEl.innerHTML = '';
+  const login = document.getElementById('feed-login').value.trim();
+  const year = document.getElementById('feed-year').value.trim();
+  const quarter = document.getElementById('feed-quarter').value;
+  if (!login || !passwordEl.value) { errorEl.textContent = 'Вкажіть логін і пароль Feed.'; return; }
+  if (!/^\d{4}$/.test(year)) { errorEl.textContent = 'Вкажіть рік.'; return; }
+  const reports = [
+    document.getElementById('feed-r-attestation').checked && 'attestation',
+    document.getElementById('feed-r-sellers').checked && 'sellers',
+    document.getElementById('feed-r-overall').checked && 'overall',
+    document.getElementById('feed-r-trainees').checked && 'trainees',
+  ].filter(Boolean);
+  if (!reports.length) { errorEl.textContent = 'Оберіть, які звіти оновити.'; return; }
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Завантаження з Feed…';
+  try {
+    const resp = await api('/api/feed-sync', {
+      method: 'POST',
+      body: JSON.stringify({ login, password: passwordEl.value, attPeriod: `${year}-${quarter}`, reports }),
+    });
+    passwordEl.value = '';
+    await loadPositionsConfig();
+    await loadStreams();
+    renderPositionSwitch();
+    state.selectedPeriodId = null;
+    if (state.trainees) state.trainees.data = null;
+    await refreshAll();
+    const reportName = (s) => (s.streamType === 'overall' ? 'Все навчання' : s.streamType === 'trainees' ? 'Стажери' : `Атестація: ${s.streamKey || FEED_ATT_TYPE_LABELS[s.attType] || s.attType}`);
+    const savedHtml = resp.saved.map((s) => `<li>${escapeHtml(reportName(s))} — ${fmtNum(s.rowsCount)} співробітників</li>`).join('');
+    const skippedHtml = resp.skipped.map((s) => `<li class="error-text">${escapeHtml(reportName(s))}: ${escapeHtml(s.reason)}</li>`).join('');
+    const unclassified = [...new Set(resp.saved.flatMap((s) => s.unclassifiedPositions))];
+    resultEl.innerHTML = `
+      <div class="field-hint" style="margin-bottom:8px;">Оновлено «${escapeHtml(resp.label)}»:</div>
+      <ul style="margin:0 0 8px 18px;">${savedHtml}${skippedHtml}</ul>
+      ${unclassified.length ? `<div class="field-hint">Нові посади для класифікації: ${unclassified.map(escapeHtml).join(', ')} — перевірте «Класифікацію посад».</div>` : ''}
+    `;
+    btn.disabled = false;
+    btn.textContent = 'Оновити ще раз';
+    document.getElementById('feed-cancel').textContent = 'Закрити';
+    showToast(`Оновлено з Feed: ${resp.saved.length} звіт(ів) за «${resp.label}».`);
+  } catch (e) {
+    errorEl.textContent = e.message;
+    btn.disabled = false;
+    btn.textContent = 'Оновити';
+  }
+}
+
+/* ===================== trainees ("Стажери") ===================== */
+
+// Internship success from Feed's "Премія за наставництво" (see /api/trainees
+// and feed_sync.trainee_success): sellers — met both sales-per-hour norms in
+// their main shop; back-office — Feed's verdict on that position's criteria.
+// Trainees dismissed during the internship, and ones still mid-internship,
+// are shown but kept out of the success rate.
+const TRAINEE_MONTHS = ['Січ', 'Лют', 'Бер', 'Кві', 'Тра', 'Чер', 'Лип', 'Сер', 'Вер', 'Жов', 'Лис', 'Гру'];
+const TRAINEE_STATUS = {
+  success: { label: 'Успішно', cls: 'success' },
+  fail: { label: 'Неуспішно', cls: 'fail' },
+  pending: { label: 'Ще стажується', cls: 'pending' },
+  dismissed: { label: 'Звільнений під час стажування', cls: 'dismissed' },
+};
+
+function traineePeriodOptions(rows) {
+  const months = [...new Set(rows.map((r) => r.year * 100 + r.month))].sort((a, b) => b - a);
+  const years = [...new Set(months.map((m) => Math.floor(m / 100)))];
+  const opts = [];
+  years.forEach((y) => {
+    const ym = months.filter((m) => Math.floor(m / 100) === y).map((m) => m % 100);
+    [4, 3, 2, 1].forEach((q) => {
+      if (ym.some((m) => Math.ceil(m / 3) === q)) opts.push({ value: `${y}-Q${q}`, label: `${q} квартал ${y}` });
+    });
+    ym.forEach((m) => opts.push({ value: `${y}-M${m}`, label: `${TRAINEE_MONTHS[m - 1]} ${y}` }));
+  });
+  return opts;
+}
+
+function traineeInPeriod(r, period) {
+  const [y, p] = period.split('-');
+  if (r.year !== Number(y)) return false;
+  const n = Number(p.slice(1));
+  if (p[0] === 'Q') return Math.ceil(r.month / 3) === n;
+  return r.month === n;
+}
+
+// Default: the latest quarter whose every month is already over — an
+// in-progress quarter would read low (internships not judged yet).
+function defaultTraineePeriod(rows) {
+  const now = new Date();
+  const curKey = now.getFullYear() * 10 + Math.ceil((now.getMonth() + 1) / 3);
+  const quarters = [...new Set(rows.map((r) => r.year * 10 + Math.ceil(r.month / 3)))].sort((a, b) => b - a);
+  const done = quarters.find((q) => q < curKey) ?? quarters[0];
+  return done ? `${Math.floor(done / 10)}-Q${done % 10}` : '';
+}
+
+function traineeRate(rows) {
+  const judged = rows.filter((r) => r.status === 'success' || r.status === 'fail');
+  const ok = judged.filter((r) => r.status === 'success').length;
+  return { ok, judged: judged.length, pct: judged.length ? (ok * 100) / judged.length : null };
+}
+
+function traineeRateCell(rate) {
+  return rate.judged ? `${badgeHtml(rate.pct)} <span class="muted">${rate.ok} з ${rate.judged}</span>` : '<span class="muted">—</span>';
+}
+
+async function renderTraineesView() {
+  const area = document.getElementById('content-area');
+  const tr = state.trainees || (state.trainees = { period: '', region: '', store: '', position: '', status: '', search: '' });
+  if (!tr.data) {
+    area.innerHTML = '<div class="card"><span class="spinner"></span> Завантаження…</div>';
+    tr.data = await api('/api/trainees');
+  }
+  // "nodata" (internship over, 0 hours worked in the evaluation period —
+  // nothing to judge) is left out of the view entirely
+  const rows = tr.data.trainees.filter((r) => r.status !== 'nodata');
+  if (!rows.length) {
+    area.innerHTML = `
+      <div class="empty-state">
+        <h2>Ще немає даних</h2>
+        <p>Стажери підтягуються з Feed: «Оновити з Feed» → галочка «Стажери».</p>
+      </div>`;
+    return;
+  }
+  const periods = traineePeriodOptions(rows);
+  if (!tr.period || !periods.some((p) => p.value === tr.period)) tr.period = defaultTraineePeriod(rows);
+  const inPeriod = rows.filter((r) => traineeInPeriod(r, tr.period));
+  const regions = [...new Set(inPeriod.map((r) => r.region).filter(Boolean))].sort();
+  const stores = [...new Set(inPeriod.filter((r) => !tr.region || r.region === tr.region).map((r) => r.store).filter(Boolean))].sort();
+  const sel = (id, label, options, value, allLabel) => `
+    <div class="filter-field">
+      <label>${label}</label>
+      <select id="${id}">${allLabel !== null ? `<option value="">${allLabel}</option>` : ''}${options.map((o) => `<option value="${escapeHtml(o.value)}" ${o.value === value ? 'selected' : ''}>${escapeHtml(o.label)}</option>`).join('')}</select>
+    </div>`;
+  const positionOptions = [
+    { value: 'prod', label: 'Продавці' }, { value: 'back', label: 'Бек-посади (усі)' },
+    ...['kass', 'klad', 'sm', 'tv'].map((t) => ({ value: t, label: { kass: 'Касир', klad: 'Комірник', sm: 'Сервіс менеджер', tv: 'Товарознавець' }[t] })),
+  ];
+
+  area.innerHTML = `
+    <div class="last-updated-note">Дані з Feed «Премія за наставництво»${tr.data.syncedAt ? `, оновлено: ${fmtUploadedAt(tr.data.syncedAt)}` : ''}</div>
+    <div class="filters">
+      ${sel('tr-period', 'Період (планове завершення)', periods, tr.period, null)}
+      ${sel('tr-region', 'Регіон', regions.map((r) => ({ value: r, label: r })), tr.region, 'Усі регіони')}
+      ${sel('tr-store', 'Магазин', stores.map((r) => ({ value: r, label: r })), tr.store, 'Усі магазини')}
+      ${sel('tr-position', 'Посада', positionOptions, tr.position, 'Усі посади')}
+      <button class="btn btn-secondary btn-sm filter-reset" id="tr-reset">Скинути фільтри</button>
+    </div>
+    <div class="table-note" style="margin:-4px 0 12px;">Продавець успішний, якщо в основному магазині виконав обидві норми: товарообіг/год і асс + сервіси/год (норма 2-ї кат. −20%). Бек-посади — за критеріями посади у Feed (іспит, CSI, помилки, швидкість збору…). Звільнені під час стажування й ті, хто ще стажується, в успішність не входять; стажери без жодної години роботи за період оцінки не показуються.</div>
+    <div class="kpi-grid" id="tr-kpis"></div>
+    <div class="grid-2">
+      <div class="card"><h3>Успішність по місяцях</h3><div class="chart-wrap"><canvas id="chart-trainees-months" height="220"></canvas></div></div>
+      <div class="card"><h3>За посадами</h3><div class="table-scroll"><table class="data-table" id="tr-positions"></table></div></div>
+    </div>
+    <div class="grid-2">
+      <div class="card"><h3>За регіонами</h3><div class="table-scroll"><table class="data-table" id="tr-regions"></table></div></div>
+      <div class="card"><h3>Магазини (від найгіршої успішності)</h3><div class="table-scroll"><table class="data-table" id="tr-stores"></table></div></div>
+    </div>
+    <div class="card">
+      <div class="table-toolbar">
+        <h3 class="mt-0">Стажери</h3>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <select id="tr-status">
+            <option value="">Усі результати</option>
+            ${Object.entries(TRAINEE_STATUS).map(([k, v]) => `<option value="${k}" ${k === tr.status ? 'selected' : ''}>${v.label}</option>`).join('')}
+          </select>
+          <input type="text" class="search-input" id="tr-search" placeholder="Пошук за ПІБ або наставником…" value="${escapeHtml(tr.search)}">
+        </div>
+      </div>
+      <div class="table-scroll"><table class="data-table" id="tr-list"></table></div>
+      <div class="table-note" id="tr-list-note"></div>
+    </div>
+  `;
+
+  const rerender = async () => { await renderTraineesView(); };
+  document.getElementById('tr-period').onchange = (e) => { tr.period = e.target.value; tr.store = ''; rerender(); };
+  document.getElementById('tr-region').onchange = (e) => { tr.region = e.target.value; tr.store = ''; rerender(); };
+  document.getElementById('tr-store').onchange = (e) => { tr.store = e.target.value; rerender(); };
+  document.getElementById('tr-position').onchange = (e) => { tr.position = e.target.value; rerender(); };
+  document.getElementById('tr-status').onchange = (e) => { tr.status = e.target.value; renderTraineeList(scoped); };
+  document.getElementById('tr-search').addEventListener('input', debounce((e) => { tr.search = e.target.value; renderTraineeList(scoped); }, 250));
+  document.getElementById('tr-reset').onclick = () => { Object.assign(tr, { region: '', store: '', position: '', status: '', search: '' }); rerender(); };
+
+  const matchPosition = (r) => !tr.position || (tr.position === 'back' ? r.type !== 'prod' : r.type === tr.position);
+  const scoped = inPeriod.filter((r) => (!tr.region || r.region === tr.region) && (!tr.store || r.store === tr.store) && matchPosition(r));
+
+  // KPI tiles
+  const all = traineeRate(scoped);
+  const sellers = traineeRate(scoped.filter((r) => r.type === 'prod'));
+  const back = traineeRate(scoped.filter((r) => r.type !== 'prod'));
+  const tiles = [
+    { label: 'Успішність стажування', value: fmtPct(all.pct), accent: 'green' },
+    { label: 'Продавці', value: fmtPct(sellers.pct), accent: '' },
+    { label: 'Бек-посади', value: fmtPct(back.pct), accent: '' },
+    { label: 'Завершили стажування', value: fmtNum(all.judged), accent: '' },
+    { label: 'Звільнились під час стажування', value: fmtNum(scoped.filter((r) => r.status === 'dismissed').length), accent: 'muted' },
+    { label: 'Ще стажуються', value: fmtNum(scoped.filter((r) => r.status === 'pending').length), accent: 'muted' },
+  ];
+  const kpiGrid = document.getElementById('tr-kpis');
+  kpiGrid.innerHTML = tiles.map((tl) => `
+    <div class="kpi-tile ${tl.accent ? `accent-${tl.accent}` : ''}">
+      <div class="kpi-value">${tl.value}</div>
+      <div class="kpi-label">${escapeHtml(tl.label)}</div>
+    </div>`).join('');
+  // one row, like renderKPIs (narrow screens keep the 2-per-row fallback)
+  kpiGrid.style.gridTemplateColumns = window.matchMedia('(max-width: 860px)').matches ? '' : `repeat(${tiles.length}, 1fr)`;
+
+  // by month chart
+  const monthKeys = [...new Set(scoped.map((r) => r.year * 100 + r.month))].sort((a, b) => a - b);
+  destroyChart('traineesMonths');
+  const rateFor = (key, pred) => traineeRate(scoped.filter((r) => r.year * 100 + r.month === key && pred(r))).pct;
+  state.charts.traineesMonths = new Chart(document.getElementById('chart-trainees-months'), {
+    type: 'bar',
+    data: {
+      labels: monthKeys.map((k) => `${TRAINEE_MONTHS[(k % 100) - 1]} ${Math.floor(k / 100)}`),
+      datasets: [
+        { label: 'Продавці', data: monthKeys.map((k) => rateFor(k, (r) => r.type === 'prod')), backgroundColor: STATUS_COLORS.good },
+        { label: 'Бек-посади', data: monthKeys.map((k) => rateFor(k, (r) => r.type !== 'prod')), backgroundColor: '#4a7dfc' },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { y: { min: 0, max: 100, ticks: { callback: (v) => `${v}%` } } },
+      plugins: {
+        legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } },
+        tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${c.raw === null ? '—' : `${Math.round(c.raw * 10) / 10}%`}` } },
+      },
+    },
+  });
+
+  // group tables
+  const groupTable = (id, keyFn, label, sortWorst) => {
+    const groups = {};
+    scoped.forEach((r) => { const k = keyFn(r); if (k) (groups[k] = groups[k] || []).push(r); });
+    let list = Object.entries(groups).map(([k, rs]) => ({ k, rate: traineeRate(rs), region: rs[0].region }));
+    list = sortWorst
+      ? list.filter((g) => g.rate.judged).sort((a, b) => a.rate.pct - b.rate.pct || b.rate.judged - a.rate.judged)
+      : list.sort((a, b) => b.rate.judged - a.rate.judged);
+    document.getElementById(id).innerHTML = `
+      <thead><tr><th>${label}</th>${id === 'tr-stores' ? '<th>Регіон</th>' : ''}<th>Успішність</th></tr></thead>
+      <tbody>${list.map((g) => `<tr><td>${escapeHtml(g.k)}</td>${id === 'tr-stores' ? `<td>${escapeHtml(g.region)}</td>` : ''}<td>${traineeRateCell(g.rate)}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">Немає даних</td></tr>'}</tbody>`;
+  };
+  groupTable('tr-positions', (r) => r.position, 'Посада', false);
+  groupTable('tr-regions', (r) => r.region, 'Регіон', true);
+  groupTable('tr-stores', (r) => r.store, 'Магазин', true);
+
+  renderTraineeList(scoped);
+}
+
+function renderTraineeList(scoped) {
+  const tr = state.trainees;
+  const q = tr.search.trim().toLowerCase();
+  const order = { fail: 0, success: 1, pending: 2, dismissed: 3 };
+  const rows = scoped
+    .filter((r) => !tr.status || r.status === tr.status)
+    .filter((r) => !q || (r.name || '').toLowerCase().includes(q) || (r.mentor || '').toLowerCase().includes(q))
+    .sort((a, b) => order[a.status] - order[b.status] || (a.region || '').localeCompare(b.region || '', 'uk') || (a.name || '').localeCompare(b.name || '', 'uk'));
+  const shown = rows.slice(0, 400);
+  document.getElementById('tr-list').innerHTML = `
+    <thead><tr><th>ПІБ</th><th>Посада</th><th>Магазин</th><th>Наставник</th><th>Стажування</th><th>Результат</th><th>Чого не вистачило</th></tr></thead>
+    <tbody>${shown.map((r) => `
+      <tr>
+        <td>${escapeHtml(r.name)}</td>
+        <td>${escapeHtml(r.position)}</td>
+        <td>${escapeHtml(r.store)}<div class="muted">${escapeHtml(r.region)}</div></td>
+        <td>${escapeHtml(r.mentor || '—')}<div class="muted">${escapeHtml(r.mentorPosition || '')}</div></td>
+        <td>${fmtFeedDate(r.dateStart)} – ${fmtFeedDate(r.dateEndPlan)}</td>
+        <td><span class="status-pill ${TRAINEE_STATUS[r.status].cls}">${TRAINEE_STATUS[r.status].label}</span></td>
+        <td>${r.reasons.map(escapeHtml).join('<br>') || '<span class="muted">—</span>'}</td>
+      </tr>`).join('') || '<tr><td colspan="7" class="muted">Немає стажерів для обраних фільтрів</td></tr>'}</tbody>`;
+  document.getElementById('tr-list-note').textContent = rows.length > shown.length
+    ? `Показано перші ${shown.length} з ${rows.length} — уточніть фільтри або пошук.`
+    : `Показано ${rows.length}.`;
+}
+
+/* ===================== KPI 2027 ===================== */
+
+// "KPI відділу навчання Роздрібу 2027": per-role KPIs computed on the
+// server (kpi.py) from attestation / "Все навчання" / trainees / AEP, plus
+// manual values for KPIs with no source yet, and the bonus index.
+const KPI_OWN_STORAGE_KEY = 'kpi-own-positions';
+
+// KPI are measured per quarter
+function kpiPeriodOptions() {
+  const now = new Date();
+  const opts = [];
+  [now.getFullYear() + 1, now.getFullYear()].forEach((y) => {
+    [4, 3, 2, 1].forEach((q) => opts.push({ value: `${y}-Q${q}`, label: `${q} квартал ${y}` }));
+  });
+  return opts;
+}
+
+function fmtKpiValue(v, unit) {
+  if (v === null || v === undefined) return '<span class="muted">—</span>';
+  const n = (Math.round(v * 10) / 10).toLocaleString('uk-UA');
+  return unit === '%' ? `${n}%` : n;
+}
+
+function kpiAchievementHtml(a) {
+  if (a === null || a === undefined) return '<span class="muted">—</span>';
+  const pct = a * 100;
+  const cls = pct >= 100 ? 'good' : pct >= 95 ? 'yellow' : 'red';
+  return `<span class="badge status-${cls}">${Math.round(pct * 10) / 10}%</span>`;
+}
+
+async function renderKpiView() {
+  const area = document.getElementById('content-area');
+  const k = state.kpi || (state.kpi = { period: '', own: null });
+  const periods = kpiPeriodOptions();
+  if (!k.period) {
+    const now = new Date();
+    k.period = `${now.getFullYear()}-Q${Math.floor(now.getMonth() / 3) + 1}`;
+  }
+  if (k.own === null) {
+    try { k.own = JSON.parse(localStorage.getItem(KPI_OWN_STORAGE_KEY) || '[]'); } catch { k.own = []; }
+  }
+  area.innerHTML = '<div class="card"><span class="spinner"></span> Розрахунок KPI…</div>';
+  const data = await api(`/api/kpi?${qs({ period: k.period, own: k.own.join(',') })}`);
+
+  const roleCard = (role) => {
+    const verdict = role.index === null
+      ? '<span class="status-pill pending">Немає даних</span>'
+      : role.complete
+        ? `<span class="status-pill ${role.bonus ? 'success' : 'fail'}">${role.bonus ? 'Премія є' : 'Премії немає'}</span>`
+        : `<span class="status-pill pending">Неповні дані: ${role.measured} з ${role.kpis.length} KPI</span>`;
+    const ownPicker = role.ownPositions ? `
+      <div class="kpi-own">Закріплені посади:
+        ${data.backPositions.map((p) => `<label><input type="checkbox" class="kpi-own-cb" value="${escapeHtml(p)}" ${k.own.includes(p) ? 'checked' : ''}> ${escapeHtml(p)}</label>`).join('')}
+      </div>` : '';
+    const rows = role.kpis.map((kp) => {
+      const factCell = kp.manual
+        ? `<div class="kpi-manual" data-kpi="${kp.key}">
+            ${kp.manual.map((m) => `<label>${escapeHtml(m.label)}<input type="text" inputmode="decimal" data-input="${m.key}" value="${m.value ?? ''}"></label>`).join('')}
+            <button class="btn btn-secondary btn-sm kpi-save">Зберегти</button>
+            ${kp.fact !== null && kp.manual.length > 1 ? `<div class="muted">= ${fmtKpiValue(kp.fact, kp.unit)}</div>` : ''}
+          </div>`
+        : fmtKpiValue(kp.fact, kp.unit);
+      return `
+        <tr>
+          <td><strong>${escapeHtml(kp.name)}</strong><div class="muted">${escapeHtml(kp.how)}</div></td>
+          <td>${Math.round(kp.weight * 100)}%</td>
+          <td>${fmtKpiValue(kp.base, kp.unit)}<div class="muted">${escapeHtml(kp.baseNote)}</div></td>
+          <td>${fmtKpiValue(kp.target, kp.unit)}</td>
+          <td>${factCell}</td>
+          <td>${kpiAchievementHtml(kp.achievement)}</td>
+        </tr>`;
+    }).join('');
+    return `
+      <div class="card">
+        <div class="kpi-role-head">
+          <h3 class="mt-0">${escapeHtml(role.name)}</h3>
+          <div class="kpi-role-index">${role.index !== null ? `Індекс <strong>${Math.round(role.index * 1000) / 10}%</strong>` : ''} ${verdict}</div>
+        </div>
+        ${ownPicker}
+        <div class="table-scroll"><table class="data-table kpi-table">
+          <thead><tr><th>KPI</th><th>Вага</th><th>База 2026</th><th>Ціль</th><th>Факт</th><th>Виконання</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+      </div>`;
+  };
+
+  area.innerHTML = `
+    <div class="filters">
+      <div class="filter-field">
+        <label>Період</label>
+        <select id="kpi-period">${periods.map((p) => `<option value="${p.value}" ${p.value === k.period ? 'selected' : ''}>${p.label}</option>`).join('')}</select>
+      </div>
+    </div>
+    <div class="table-note" style="margin:-4px 0 12px;">Ціль = база × 1,04 (якщо в документі KPI не вказана інша). Виконання = факт / ціль, не більше ${Math.round(data.cap * 100)}%. Індекс — зважене виконання за вагами ролі; премія є, якщо індекс ≥ ${Math.round(data.bonusThreshold * 100)}%. Поля для KPI без джерела даних заповнюються вручну за обраний період.</div>
+    ${data.roles.map(roleCard).join('')}
+  `;
+
+  document.getElementById('kpi-period').onchange = (e) => { k.period = e.target.value; renderKpiView(); };
+  area.querySelectorAll('.kpi-own-cb').forEach((cb) => cb.addEventListener('change', () => {
+    k.own = [...area.querySelectorAll('.kpi-own-cb:checked')].map((x) => x.value);
+    try { localStorage.setItem(KPI_OWN_STORAGE_KEY, JSON.stringify(k.own)); } catch { /* per-viewer convenience only */ }
+    renderKpiView();
+  }));
+  area.querySelectorAll('.kpi-manual').forEach((box) => {
+    box.querySelector('.kpi-save').addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      const values = {};
+      box.querySelectorAll('input[data-input]').forEach((inp) => { values[inp.dataset.input] = inp.value.trim(); });
+      btn.disabled = true;
+      try {
+        await api('/api/kpi-manual', { method: 'POST', body: JSON.stringify({ period: k.period, kpi: box.dataset.kpi, values }) });
+        showToast('Збережено');
+        await renderKpiView();
+      } catch (err) {
+        showToast(err.message, true);
+        btn.disabled = false;
+      }
+    });
+  });
 }
 
 /* ===================== position classification modal ===================== */
@@ -4825,6 +5385,7 @@ function bindTopActions() {
   document.getElementById('login-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
   document.getElementById('btn-logout').addEventListener('click', doLogout);
   document.getElementById('btn-upload').addEventListener('click', openUploadModal);
+  document.getElementById('btn-feed-sync').addEventListener('click', openFeedSyncModal);
   document.getElementById('btn-classify').addEventListener('click', openClassifyModal);
   document.getElementById('btn-director-report').addEventListener('click', openDirectorReportView);
   document.getElementById('btn-lesson-report').addEventListener('click', openLessonReportView);

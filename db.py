@@ -43,6 +43,64 @@ CREATE TABLE IF NOT EXISTS details (
     actual_entered INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_details_period ON details(period_id);
+
+-- Per-topic breakdown of an LMS period ("Звіт по заняттях" pulled from
+-- Feed — the .xls export only has per-person totals, so manually uploaded
+-- periods have no rows here). One row per person per topic (training);
+-- region/store/position/name mirror the person's details row so the same
+-- filters apply. mark is NULL for a topic without a test (or not taken);
+-- done_at is when Feed recorded it as passed.
+CREATE TABLE IF NOT EXISTS detail_topics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    period_id INTEGER NOT NULL REFERENCES periods(id) ON DELETE CASCADE,
+    region TEXT,
+    store TEXT,
+    position TEXT,
+    name TEXT,
+    topic TEXT NOT NULL,
+    schedule_id INTEGER,
+    dt_start TEXT,
+    dt_end TEXT,
+    threshold REAL,
+    mark REAL,
+    done_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_detail_topics_period ON detail_topics(period_id, topic);
+
+-- Trainees from Feed's "Премія за наставництво" (see feed_sync.fetch_trainees),
+-- one row per trainee per month of planned internship end. raw_json keeps the
+-- full Feed record so new fields (e.g. sales norms) can be read later without
+-- a re-sync; the columns are just the ones queried directly.
+CREATE TABLE IF NOT EXISTS trainees (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    year INTEGER NOT NULL,
+    month INTEGER NOT NULL,
+    feed_user_id INTEGER,
+    name TEXT,
+    region TEXT,
+    store TEXT,
+    newbie_type TEXT,
+    position TEXT,
+    dismissed INTEGER NOT NULL DEFAULT 0,  -- during the internship (feed_sync.dismissed_during_internship)
+    date_start TEXT,
+    date_end_plan TEXT,
+    date_end_fact TEXT,
+    bonus INTEGER,
+    success INTEGER,  -- feed_sync.trainee_success: 1/0, NULL = not judged (dismissed / no targets yet)
+    raw_json TEXT,
+    synced_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trainees_month ON trainees(year, month);
+
+-- KPI page: values for KPIs with no data source yet (retail plan, internal
+-- appointments, 2nd category, knowledge by category), per period ("2027-H1").
+CREATE TABLE IF NOT EXISTS kpi_manual (
+    period TEXT NOT NULL,
+    kpi_key TEXT NOT NULL,
+    values_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (period, kpi_key)
+);
 CREATE INDEX IF NOT EXISTS idx_periods_stream ON periods(stream_type, stream_key);
 
 CREATE TABLE IF NOT EXISTS positions_config (
@@ -270,6 +328,9 @@ def init_db():
     crit_cols = [r["name"] for r in conn.execute("PRAGMA table_info(category_criteria)").fetchall()]
     if crit_cols and "rules_json" not in crit_cols:
         conn.execute("ALTER TABLE category_criteria ADD COLUMN rules_json TEXT")
+    trainee_cols = [r["name"] for r in conn.execute("PRAGMA table_info(trainees)").fetchall()]
+    if trainee_cols and "success" not in trainee_cols:
+        conn.execute("ALTER TABLE trainees ADD COLUMN success INTEGER")
     _renormalize_aep_names(conn)
     for position, segment, first_line in DEFAULT_POSITIONS:
         conn.execute(

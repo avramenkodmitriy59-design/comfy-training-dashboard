@@ -9,6 +9,12 @@ from flask import Flask, request, session, jsonify, send_from_directory
 from werkzeug.utils import redirect
 
 import db
+import kpi
+from feed_sync import (
+    FeedClient, FeedError, fetch_attestation_reports, fetch_overall_report, fetch_sellers_report, fetch_trainees,
+    trainee_success, dismissed_during_internship, trainee_failure_reasons, TRAINEE_TYPE_LABELS,
+    relative_quarter_period,
+)
 from aggregate import (
     aggregate, clean_row, detect_attestation_stream, distribution, ATTESTATION_STREAMS,
     aggregate_project, clean_project_row, distribution_project,
@@ -238,24 +244,37 @@ def list_streams():
 
 # ---------- upload ----------
 
+class UploadError(ValueError):
+    """Validation failure in save_lms_period — message is shown to the user."""
+
+
 @app.post("/api/upload")
 def upload():
     data = request.get_json(silent=True) or {}
-    stream_type = data.get("streamType")
-    label = str(data.get("label", "")).strip()
-    raw_rows = data.get("rows") or []
+    try:
+        result = save_lms_period(
+            data.get("streamType"), str(data.get("label", "")).strip(),
+            data.get("rows") or [], str(data.get("projectName", "")).strip(),
+        )
+    except UploadError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, **result})
 
+
+def save_lms_period(stream_type, label, raw_rows, project_name=""):
+    """Validate, aggregate and store one LMS report period — shared by the
+    manual .xls upload and the Feed sync (see /api/feed-sync), so both go
+    through exactly the same cleaning and replace-same-label rules."""
     if stream_type not in ("overall", "attestation", "project"):
-        return jsonify({"error": "Невідомий тип звіту"}), 400
+        raise UploadError("Невідомий тип звіту")
     if not label:
-        return jsonify({"error": "Вкажіть період (наприклад: Вересень 2026)"}), 400
+        raise UploadError("Вкажіть період (наприклад: Вересень 2026)")
     if not raw_rows:
-        return jsonify({"error": "У файлі не знайдено жодного рядка співробітників"}), 400
+        raise UploadError("У файлі не знайдено жодного рядка співробітників")
 
     if stream_type == "project":
-        project_name = str(data.get("projectName", "")).strip()
         if not project_name:
-            return jsonify({"error": "Вкажіть назву проєкту"}), 400
+            raise UploadError("Вкажіть назву проєкту")
         stream_key = project_name
 
         rows = [clean_project_row(r) for r in raw_rows]
@@ -264,7 +283,9 @@ def upload():
         totals, by_region, by_store, by_position = aggregate_project(rows)
         dist = distribution_project(rows)
     else:
-        rows = [clean_row(r) for r in raw_rows]
+        # "_topics" rides along untouched (aggregate() ignores it) — only
+        # Feed-synced rows have it; see detail_topics.
+        rows = [{**clean_row(r), "_topics": r.get("topics") or []} for r in raw_rows]
         rows = [r for r in rows if r["region"] or r["name"]]
 
         if stream_type == "overall":
@@ -272,10 +293,10 @@ def upload():
         else:
             canonical, dominant_raw = detect_attestation_stream(rows)
             if not canonical:
-                return jsonify({
-                    "error": f"Не вдалося визначити атестаційну посаду за колонкою «Посада» "
-                             f"(зустрілось: «{dominant_raw or '—'}»). Перевірте файл.",
-                }), 400
+                raise UploadError(
+                    f"Не вдалося визначити атестаційну посаду за колонкою «Посада» "
+                    f"(зустрілось: «{dominant_raw or '—'}»). Перевірте файл."
+                )
             stream_key = canonical
 
         totals, by_region, by_store, by_position = aggregate(rows)
@@ -334,6 +355,14 @@ def upload():
                     (period_id, r["region"], r["store"], r["position"], r["name"],
                      r["assigned"], r["completed"], r["progress"], r["score"]),
                 )
+                for t in r["_topics"]:
+                    conn.execute(
+                        "INSERT INTO detail_topics (period_id, region, store, position, name, topic, "
+                        "schedule_id, dt_start, dt_end, threshold, mark, done_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (period_id, r["region"], r["store"], r["position"], r["name"], t["topic"],
+                         t.get("scheduleId"), t.get("start"), t.get("end"), t.get("threshold"),
+                         t.get("mark"), t.get("doneAt")),
+                    )
 
         for pos in unclassified:
             conn.execute(
@@ -349,15 +378,216 @@ def upload():
     finally:
         conn.close()
 
-    return jsonify({
-        "ok": True,
+    return {
         "periodId": period_id,
         "streamType": stream_type,
         "streamKey": stream_key,
         "rowsCount": len(rows),
         "unclassifiedPositions": unclassified,
         "totals": totals,
-    })
+    }
+
+
+@app.post("/api/feed-sync")
+def feed_sync():
+    """Pull reports straight from Comfy Feed with the operator's own Feed
+    login — same data as exporting "Звіт по заняттях" to .xls and uploading
+    it by hand: attestation (one report per position) and/or "Все
+    навчання". The password is used for this one request only: never
+    logged, stored, or echoed back."""
+    data = request.get_json(silent=True) or {}
+    login = str(data.get("login") or "").strip()
+    password = str(data.get("password") or "")
+    att_period = str(data.get("attPeriod") or "").strip()
+    reports = [r for r in (data.get("reports") or ["attestation"]) if r in ("attestation", "sellers", "overall", "trainees")]
+    if not login or not password:
+        return jsonify({"error": "Вкажіть логін і пароль Feed"}), 400
+    if not re.fullmatch(r"\d{4}-[1-4]", att_period):
+        return jsonify({"error": "Невірний період (очікується РРРР-К, наприклад 2026-4)"}), 400
+    if not reports:
+        return jsonify({"error": "Оберіть, які звіти оновити"}), 400
+    year, quarter = (int(x) for x in att_period.split("-"))
+    label = f"{quarter} квартал {year}"
+    period = relative_quarter_period(year, quarter, datetime.date.today())
+    if not period and ("overall" in reports or "sellers" in reports):
+        return jsonify({
+            "error": "«Все навчання» і атестацію продавців Feed формує лише за поточний або попередній "
+                     "квартал — оберіть один із них або завантажте старіший період файлом.",
+        }), 400
+
+    client = FeedClient()
+    try:
+        client.login(login, password)
+        att_reports = []
+        if "attestation" in reports:
+            _, att_reports = fetch_attestation_reports(client, att_period, period or "current_quarter")
+        sellers_rows = fetch_sellers_report(client, period) if "sellers" in reports else None
+        overall_rows = fetch_overall_report(client, period) if "overall" in reports else None
+        months = [(quarter - 1) * 3 + i for i in (1, 2, 3)]
+        trainees_by_month = {m: fetch_trainees(client, year, m) for m in months} if "trainees" in reports else {}
+    except FeedError as e:
+        return jsonify({"error": str(e)}), 502
+
+    saved, skipped = [], []
+
+    def save(stream_type, rows, att_type=None):
+        try:
+            result = save_lms_period(stream_type, label, rows)
+        except UploadError as e:
+            skipped.append({"streamType": stream_type, "attType": att_type, "reason": str(e)})
+            return
+        saved.append({
+            "streamType": stream_type, "attType": att_type, "streamKey": result["streamKey"],
+            "rowsCount": result["rowsCount"], "unclassifiedPositions": result["unclassifiedPositions"],
+        })
+
+    for att_type, rows in att_reports:
+        # sellers have their own source ("Звіт з АТТ") — don't let a
+        # "Звіт по заняттях" prod report overwrite the same Продавець period
+        if att_type == "prod" and "sellers" in reports:
+            continue
+        save("attestation", rows, att_type)
+    if sellers_rows:
+        save("attestation", sellers_rows, "sellers")
+    elif "sellers" in reports:
+        skipped.append({"streamType": "attestation", "attType": "sellers", "reason": f"У Feed немає оцінок продавців за {label}"})
+    if overall_rows is not None:
+        save("overall", overall_rows)
+    elif "overall" in reports:
+        skipped.append({"streamType": "overall", "attType": None, "reason": f"У Feed немає занять за {label}"})
+    if trainees_by_month:
+        counts = save_trainees(year, trainees_by_month)
+        saved.append({"streamType": "trainees", "attType": None, "streamKey": "Стажери",
+                      "rowsCount": sum(counts.values()), "unclassifiedPositions": []})
+    if not saved and not skipped:
+        return jsonify({"error": f"У Feed немає атестаційних занять за {label}"}), 404
+    return jsonify({"ok": True, "label": label, "saved": saved, "skipped": skipped})
+
+
+_KPI_PERIOD_RE = re.compile(r"\d{4}-(H[12]|Q[1-4])")
+
+
+@app.get("/api/kpi")
+def kpi_page():
+    period = request.args.get("period") or ""
+    if not _KPI_PERIOD_RE.fullmatch(period):
+        return jsonify({"error": "Невірний період (очікується РРРР-H1 або РРРР-Q3)"}), 400
+    own = [p for p in (request.args.get("own") or "").split(",") if p]
+    conn = db.get_db()
+    manual = {r["kpi_key"]: json.loads(r["values_json"]) for r in conn.execute(
+        "SELECT kpi_key, values_json FROM kpi_manual WHERE period = ?", (period,)
+    ).fetchall()}
+    result = kpi.compute(conn, period, own, manual)
+    conn.close()
+    return jsonify(result)
+
+
+@app.post("/api/kpi-manual")
+def kpi_manual_save():
+    data = request.get_json(silent=True) or {}
+    period, key = str(data.get("period") or ""), str(data.get("kpi") or "")
+    if not _KPI_PERIOD_RE.fullmatch(period) or key not in kpi.MANUAL:
+        return jsonify({"error": "Невірний період або KPI"}), 400
+    allowed = {k for k, _ in kpi.MANUAL[key]["inputs"]}
+    values = {}
+    for k, v in (data.get("values") or {}).items():
+        if k not in allowed or v in (None, ""):
+            continue
+        try:
+            values[k] = float(str(v).replace(",", "."))
+        except ValueError:
+            return jsonify({"error": f"«{v}» — не число"}), 400
+    conn = db.get_db()
+    if values:
+        conn.execute(
+            "INSERT INTO kpi_manual (period, kpi_key, values_json, updated_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(period, kpi_key) DO UPDATE SET values_json = excluded.values_json, updated_at = excluded.updated_at",
+            (period, key, json.dumps(values), datetime.datetime.utcnow().isoformat() + "Z"),
+        )
+    else:
+        conn.execute("DELETE FROM kpi_manual WHERE period = ? AND kpi_key = ?", (period, key))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/trainees")
+def trainees_list():
+    """Every synced trainee, with the KPI verdict already resolved into a
+    status — the "Стажери" tab filters and aggregates client-side (a few
+    hundred rows a quarter). status: success / fail / dismissed (during the
+    internship — out of the KPI) / pending (planned end not reached yet) /
+    nodata (over, but nothing for Feed to judge it by)."""
+    today = datetime.date.today().isoformat()
+    conn = db.get_db()
+    rows = conn.execute(
+        "SELECT year, month, name, region, store, newbie_type, dismissed, date_start, date_end_plan, "
+        "date_end_fact, success, raw_json, synced_at FROM trainees ORDER BY year, month, name"
+    ).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        e = json.loads(r["raw_json"])
+        reasons = []
+        if r["dismissed"]:
+            status = "dismissed"
+        elif not r["date_end_plan"] or r["date_end_plan"][:10] > today:
+            status = "pending"
+        elif r["success"] is None:
+            # internship is over but Feed has nothing to judge it by — in
+            # practice 0 hours worked in the evaluation period (often a
+            # dismissal Feed recorded without a date)
+            status = "nodata"
+            reasons = ["Немає годин роботи за період оцінки"
+                       + (" · заблокований у Feed без дати звільнення" if (e.get("user") or {}).get("blocked") else "")]
+        else:
+            status = "success" if r["success"] else "fail"
+        tutor = e.get("tutor") or {}
+        out.append({
+            "year": r["year"], "month": r["month"], "name": r["name"], "region": r["region"], "store": r["store"],
+            "type": r["newbie_type"], "position": TRAINEE_TYPE_LABELS.get(r["newbie_type"], r["newbie_type"]),
+            "status": status, "dateStart": r["date_start"], "dateEndPlan": r["date_end_plan"],
+            "mentor": tutor.get("fio_full") or tutor.get("fio"), "mentorPosition": tutor.get("position"),
+            "examMark": (e.get("pps") or {}).get("final_test_mark"),
+            "reasons": trainee_failure_reasons(e) if status == "fail" else reasons,
+        })
+    synced = max((r["synced_at"] for r in rows), default=None)
+    return jsonify({"trainees": out, "syncedAt": synced})
+
+
+def save_trainees(year, trainees_by_month):
+    """Replace each month's trainees with what Feed returned for it (a
+    re-sync mid-month picks up newly finished internships and bonus
+    decisions). Returns {month: count}."""
+    now = datetime.datetime.utcnow().isoformat() + "Z"
+    conn = db.get_db()
+    counts = {}
+    try:
+        conn.execute("BEGIN")
+        for month, entries in trainees_by_month.items():
+            conn.execute("DELETE FROM trainees WHERE year = ? AND month = ?", (year, month))
+            for e in entries:
+                user = e.get("user") or {}
+                process = e.get("process") or {}
+                conn.execute(
+                    "INSERT INTO trainees (year, month, feed_user_id, name, region, store, newbie_type, position, "
+                    "dismissed, date_start, date_end_plan, date_end_fact, bonus, success, raw_json, synced_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (year, month, user.get("user_id"), str(user.get("fio") or "").strip(),
+                     str(user.get("reg") or "").strip(), str(user.get("mag") or "").strip(),
+                     e.get("newbie_type"), str(user.get("position") or "").strip(),
+                     1 if dismissed_during_internship(e) else 0,
+                     process.get("date_start"), process.get("date_end_plan"), process.get("date_end_fact"),
+                     1 if e.get("bonus") else 0, trainee_success(e), json.dumps(e, ensure_ascii=False), now),
+                )
+            counts[month] = len(entries)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return counts
 
 
 def _known_positions():
@@ -2129,6 +2359,32 @@ def category_report_metrics():
 
 # ---------- periods / trend ----------
 
+def _merged_attestation_periods(conn):
+    """Attestation "Усі посади" periods: one entry per label, every
+    position's totals summed (shaped like a periods row), keyed by the
+    group's newest period id — _resolve_scope maps that id back to the
+    whole group. Ordered by when the label first appeared."""
+    groups = {}
+    for r in conn.execute(
+        "SELECT id, stream_key, label, uploaded_at, has_details, totals_json FROM periods "
+        "WHERE stream_type = 'attestation' ORDER BY uploaded_at ASC"
+    ).fetchall():
+        g = groups.setdefault(r["label"], {
+            "id": r["id"], "label": r["label"], "uploaded_at": r["uploaded_at"], "has_details": 0,
+            "totals": {}, "by_position_json": "{}", "aep_goal": None, "period_year": None, "period_quarter": None,
+        })
+        g["id"] = max(g["id"], r["id"])
+        g["uploaded_at"] = max(g["uploaded_at"], r["uploaded_at"])
+        g["has_details"] = g["has_details"] or r["has_details"]
+        totals = json.loads(r["totals_json"])
+        if r["stream_key"] in SCORE_ONLY_ATTESTATION:
+            totals = {"scoreSum": totals.get("scoreSum", 0), "scoreCount": totals.get("scoreCount", 0)}
+        for k, v in totals.items():
+            if isinstance(v, (int, float)):
+                g["totals"][k] = g["totals"].get(k, 0) + v
+    return [{**g, "totals_json": json.dumps(g.pop("totals"))} for g in groups.values()]
+
+
 @app.get("/api/periods")
 def periods():
     stream_type = request.args.get("streamType")
@@ -2139,12 +2395,15 @@ def periods():
         "ORDER BY period_year ASC, period_quarter ASC" if stream_type == "aep" else "ORDER BY uploaded_at ASC"
     )
     conn = db.get_db()
-    rows = conn.execute(
-        f"SELECT id, label, uploaded_at, has_details, totals_json, by_position_json, aep_goal, "
-        f"period_year, period_quarter FROM periods "
-        f"WHERE stream_type = ? AND stream_key = ? {order_sql}",
-        (stream_type, stream_key),
-    ).fetchall()
+    if _is_all_attestation(stream_type, stream_key):
+        rows = _merged_attestation_periods(conn)
+    else:
+        rows = conn.execute(
+            f"SELECT id, label, uploaded_at, has_details, totals_json, by_position_json, aep_goal, "
+            f"period_year, period_quarter FROM periods "
+            f"WHERE stream_type = ? AND stream_key = ? {order_sql}",
+            (stream_type, stream_key),
+        ).fetchall()
     conn.close()
     out = []
     for r in rows:
@@ -2189,15 +2448,18 @@ def latest():
     if not stream_type or not stream_key:
         return jsonify({"error": "streamType і streamKey обов'язкові"}), 400
     conn = db.get_db()
-    row = _resolve_period(conn, stream_type, stream_key, request.args.get("periodId"))
+    row, ids, _ = _resolve_scope(conn, stream_type, stream_key, request.args.get("periodId"))
     if not row:
         conn.close()
         return jsonify({"period": None})
 
+    in_ids = ",".join("?" for _ in ids)
     filters_rows = conn.execute(
-        "SELECT DISTINCT region, store, position FROM details WHERE period_id = ?",
-        (row["id"],),
+        f"SELECT DISTINCT region, store, position FROM details WHERE period_id IN ({in_ids})", ids,
     ).fetchall()
+    topics = [r["topic"] for r in conn.execute(
+        f"SELECT DISTINCT topic FROM detail_topics WHERE period_id IN ({in_ids}) ORDER BY topic", ids
+    ).fetchall()]
     conn.close()
 
     regions = sorted({r["region"] for r in filters_rows if r["region"]})
@@ -2218,11 +2480,32 @@ def latest():
             "regions": regions,
             "positions": positions,
             "storesByRegion": stores_by_region,
+            "topics": topics,
         },
     })
 
 
 # ---------- shared filtering (summary + employee table both work off a chosen period's detail rows) ----------
+
+def _detail_source(args):
+    """FROM-clause for the summary / employee table: the per-person details
+    table, or — with ?topic= — that one topic's per-person rows from
+    detail_topics, reshaped into the same columns (assigned 1, completed /
+    progress = passed or not, score = the topic's mark) so _build_where and
+    aggregate() work on it unchanged. has_score keeps a passed topic with no
+    test (mark NULL) out of the average score instead of counting it as 0%."""
+    topic = (args.get("topic") or "").strip()
+    if not topic:
+        return "details", []
+    return (
+        "(SELECT period_id, region, store, position, name, 1.0 AS assigned, "
+        "CASE WHEN done_at IS NOT NULL THEN 1.0 ELSE 0.0 END AS completed, "
+        "CASE WHEN done_at IS NOT NULL THEN 100.0 ELSE 0.0 END AS progress, "
+        "COALESCE(mark, 0) AS score, (mark IS NOT NULL) AS has_score, done_at "
+        "FROM detail_topics WHERE topic = ?)",
+        [topic],
+    )
+
 
 def _resolve_period(conn, stream_type, stream_key, period_id):
     """A specific period by id (validated to belong to this stream), or the
@@ -2247,9 +2530,55 @@ def _resolve_period(conn, stream_type, stream_key, period_id):
     ).fetchone()
 
 
-def _build_where(conn, period_id, args):
-    where = ["period_id = ?"]
-    params = [period_id]
+# Attestation "Усі посади": every position's attestation period sharing one
+# label (e.g. "4 квартал 2026"), merged on the fly — each position is still
+# stored as its own period (one upload / Feed report per position).
+ALL_ATTESTATION_KEY = "__all__"
+# positions whose attestation source gives a mark only — their stored
+# progress is a stand-in (see fetch_sellers_report), so "Усі посади" leaves
+# them out of progress and counts them toward the average score only
+SCORE_ONLY_ATTESTATION = {"Продавець"}
+
+
+def _is_all_attestation(stream_type, stream_key):
+    return stream_type == "attestation" and stream_key == ALL_ATTESTATION_KEY
+
+
+def _resolve_scope(conn, stream_type, stream_key, period_id):
+    """(period, period_ids, stream_by_period) for the chosen period. For a
+    normal stream that's just the one period. For attestation "Усі посади"
+    `period` is a stand-in for the whole group sharing the chosen period's
+    label (latest-uploaded label by default), and stream_by_period maps each
+    member period to its position (stream_key)."""
+    if not _is_all_attestation(stream_type, stream_key):
+        period = _resolve_period(conn, stream_type, stream_key, period_id)
+        return period, ([period["id"]] if period else []), {}
+    anchor = conn.execute(
+        "SELECT label FROM periods WHERE stream_type = 'attestation' AND id = ?", (period_id,)
+    ).fetchone() if period_id else None
+    if not anchor:
+        anchor = conn.execute(
+            "SELECT label FROM periods WHERE stream_type = 'attestation' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    if not anchor:
+        return None, [], {}
+    members = conn.execute(
+        "SELECT id, stream_key, uploaded_at FROM periods WHERE stream_type = 'attestation' AND label = ?",
+        (anchor["label"],),
+    ).fetchall()
+    period = {
+        "id": max(m["id"] for m in members), "label": anchor["label"],
+        "uploaded_at": max(m["uploaded_at"] for m in members),
+        "stream_type": "attestation", "stream_key": ALL_ATTESTATION_KEY, "aep_goal": None,
+    }
+    return period, [m["id"] for m in members], {m["id"]: m["stream_key"] for m in members}
+
+
+def _build_where(conn, period_ids, args):
+    if not isinstance(period_ids, (list, tuple)):
+        period_ids = [period_ids]
+    where = [f"period_id IN ({','.join('?' for _ in period_ids)})" if period_ids else "1 = 0"]
+    params = list(period_ids)
 
     region = args.get("region")
     store = args.get("store")
@@ -2303,7 +2632,7 @@ def summary():
         return jsonify({"error": "streamType і streamKey обов'язкові"}), 400
 
     conn = db.get_db()
-    period = _resolve_period(conn, stream_type, stream_key, request.args.get("periodId"))
+    period, ids, stream_by_period = _resolve_scope(conn, stream_type, stream_key, request.args.get("periodId"))
     if not period:
         conn.close()
         return jsonify({"period": None})
@@ -2318,11 +2647,22 @@ def summary():
         if is_aep else
         "region, store, position, name, assigned, completed, progress, score"
     )
-    where_sql, params = _build_where(conn, period["id"], request.args)
-    rows = conn.execute(f"SELECT {columns} FROM details WHERE {where_sql}", params).fetchall()
+    source_sql, source_params = ("details", []) if (is_project or is_aep) else _detail_source(request.args)
+    if source_sql != "details":
+        columns += ", has_score"
+    if stream_by_period:
+        columns += ", period_id"
+    where_sql, params = _build_where(conn, ids, request.args)
+    rows = conn.execute(f"SELECT {columns} FROM {source_sql} WHERE {where_sql}", source_params + params).fetchall()
     conn.close()
 
     rows = [db.row_to_dict(r) for r in rows]
+    if stream_by_period:
+        # "Усі посади": group by attestation position (Директор, Касир...)
+        # rather than the raw LMS job titles inside each position's report
+        for r in rows:
+            r["position"] = stream_by_period.get(r.pop("period_id"), r["position"])
+            r["score_only"] = r["position"] in SCORE_ONLY_ATTESTATION
     if is_project:
         rows = [{
             **r, "testsPercent": r["tests_percent"], "homeworkScore": r["homework_score"],
@@ -2361,7 +2701,41 @@ DETAIL_SORT_COLUMNS = {
     "testsPercent": "tests_percent", "homeworkScore": "homework_score",
     "homeworkMax": "homework_max", "homeworkPercent": "homework_percent",
     "testsAssignedCount": "tests_assigned_count", "testsCompletedCount": "tests_completed_count",
+    "doneAt": "done_at",
 }
+
+
+@app.get("/api/topics")
+def topics_summary():
+    """"Результати по темах": per topic of the chosen period (Feed-synced
+    LMS periods only — see detail_topics), under the same region / store /
+    position filters as everything else: how many people it was assigned
+    to, how many passed it, and the average mark among those with one."""
+    stream_type = request.args.get("streamType")
+    stream_key = request.args.get("streamKey")
+    if not stream_type or not stream_key:
+        return jsonify({"error": "streamType і streamKey обов'язкові"}), 400
+    conn = db.get_db()
+    period, ids, _ = _resolve_scope(conn, stream_type, stream_key, request.args.get("periodId"))
+    if not period or period["stream_type"] not in ("overall", "attestation"):
+        conn.close()
+        return jsonify({"topics": []})
+    where_sql, params = _build_where(conn, ids, request.args)
+    rows = conn.execute(
+        "SELECT topic, COUNT(*) AS assigned, SUM(done_at IS NOT NULL) AS completed, "
+        "AVG(mark) AS avg_mark, COUNT(mark) AS marked, MIN(dt_start) AS dt_start, MAX(dt_end) AS dt_end "
+        f"FROM detail_topics WHERE {where_sql} GROUP BY topic",
+        params,
+    ).fetchall()
+    conn.close()
+    topics = [{
+        "topic": r["topic"], "assigned": r["assigned"], "completed": r["completed"],
+        "completionPct": round(r["completed"] * 100 / r["assigned"], 1) if r["assigned"] else 0,
+        "avgScore": round(r["avg_mark"], 1) if r["avg_mark"] is not None else None,
+        "marked": r["marked"], "start": r["dt_start"], "end": r["dt_end"],
+    } for r in rows]
+    topics.sort(key=lambda t: (-t["assigned"], t["topic"]))
+    return jsonify({"topics": topics})
 
 
 @app.get("/api/details")
@@ -2372,7 +2746,7 @@ def details():
         return jsonify({"error": "streamType і streamKey обов'язкові"}), 400
 
     conn = db.get_db()
-    period = _resolve_period(conn, stream_type, stream_key, request.args.get("periodId"))
+    period, ids, stream_by_period = _resolve_scope(conn, stream_type, stream_key, request.args.get("periodId"))
     if not period:
         conn.close()
         return jsonify({"rows": [], "total": 0, "shown": 0})
@@ -2386,7 +2760,13 @@ def details():
         "region, store, position, name, assigned, completed, progress, score"
     )
 
-    where_sql, params = _build_where(conn, period["id"], request.args)
+    source_sql, source_params = ("details", []) if is_project else _detail_source(request.args)
+    if source_sql != "details":
+        columns += ", has_score, done_at"
+    if stream_by_period:
+        columns += ", period_id"
+    where_sql, params = _build_where(conn, ids, request.args)
+    params = source_params + params
 
     search = request.args.get("search")
     if search:
@@ -2395,17 +2775,28 @@ def details():
 
     sort = request.args.get("sort", default_sort)
     sort_col = DETAIL_SORT_COLUMNS.get(sort, default_sort)
+    if sort_col == "done_at" and source_sql == "details":
+        sort_col = DETAIL_SORT_COLUMNS[default_sort]
     direction = "DESC" if request.args.get("dir", "asc") == "desc" else "ASC"
     limit = min(int(request.args.get("limit", 400) or 400), 1000)
 
-    total = conn.execute(f"SELECT COUNT(*) c FROM details WHERE {where_sql}", params).fetchone()["c"]
+    total = conn.execute(f"SELECT COUNT(*) c FROM {source_sql} WHERE {where_sql}", params).fetchone()["c"]
     rows = conn.execute(
-        f"SELECT {columns} FROM details WHERE {where_sql} ORDER BY {sort_col} {direction} LIMIT ?",
+        f"SELECT {columns} FROM {source_sql} WHERE {where_sql} ORDER BY {sort_col} {direction} LIMIT ?",
         params + [limit],
     ).fetchall()
     conn.close()
 
     rows = [db.row_to_dict(r) for r in rows]
+    if stream_by_period:
+        for r in rows:
+            r["scoreOnly"] = stream_by_period.get(r.pop("period_id")) in SCORE_ONLY_ATTESTATION
+    if source_sql != "details":
+        # a passed topic without a test has no mark — show it as blank, not 0%
+        for r in rows:
+            if not r.pop("has_score"):
+                r["score"] = None
+            r["doneAt"] = r.pop("done_at")
     if is_project:
         rows = [{
             "region": r["region"], "store": r["store"], "position": r["position"], "name": r["name"],

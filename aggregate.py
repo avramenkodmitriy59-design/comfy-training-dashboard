@@ -77,10 +77,20 @@ def _new_bucket(extra=None):
         "scoreSum": 0.0,
         "scoreCount": 0,
         "noAssignment": 0,
+        "scoreOnly": 0,
     }
     if extra:
         b.update(extra)
     return b
+
+
+def _has_score(row):
+    """Whether a row's score counts toward the average: anyone who started
+    — except per-topic rows (see /api/summary with a topic) can be passed
+    without having a mark at all (a topic with no test), flagged has_score=0."""
+    if "has_score" in row:
+        return bool(row["has_score"])
+    return row["progress"] > 0
 
 
 def aggregate(rows):
@@ -94,6 +104,12 @@ def aggregate(rows):
         if key not in bucket:
             bucket[key] = _new_bucket(extra)
         b = bucket[key]
+        if row.get("score_only"):
+            b["scoreOnly"] += 1
+            if _has_score(row):
+                b["scoreSum"] += row["score"]
+                b["scoreCount"] += 1
+            return
         b["assigned"] += row["assigned"]
         b["completed"] += row["completed"]
         if row["assigned"] == 0:
@@ -104,21 +120,30 @@ def aggregate(rows):
         # Average score is computed only over people who actually started
         # (progress > 0) — otherwise everyone who hasn't begun yet (score 0)
         # drags the average down alongside people who genuinely failed.
-        if row["progress"] > 0:
+        if _has_score(row):
             b["scoreSum"] += row["score"]
             b["scoreCount"] += 1
 
     for row in rows:
-        totals["assigned"] += row["assigned"]
-        totals["completed"] += row["completed"]
-        if row["assigned"] == 0:
+        if row.get("score_only"):
+            # sellers inside attestation "Усі посади": their progress is a
+            # stand-in (see fetch_sellers_report), so they count toward the
+            # average score and headcount only — not progress / courses
+            totals["scoreOnly"] += 1
+            if _has_score(row):
+                totals["scoreSum"] += row["score"]
+                totals["scoreCount"] += 1
+        elif row["assigned"] == 0:
+            totals["assigned"] += row["assigned"]
             totals["noAssignment"] += 1
         else:
+            totals["assigned"] += row["assigned"]
+            totals["completed"] += row["completed"]
             totals["count"] += 1
             totals["progressSum"] += row["progress"]
             if row["progress"] == 0:
                 totals["notStarted"] += 1
-            else:
+            if _has_score(row):
                 totals["scoreSum"] += row["score"]
                 totals["scoreCount"] += 1
 
@@ -137,7 +162,7 @@ def distribution(rows):
     fixed order so chart legends line up with the red/orange/yellow/green scale."""
     buckets = {"lt40": 0, "from40to69": 0, "from70to89": 0, "gte90": 0}
     for r in rows:
-        if r["assigned"] == 0:
+        if r["assigned"] == 0 or r.get("score_only"):
             continue
         p = r["progress"]
         if p < 40:
