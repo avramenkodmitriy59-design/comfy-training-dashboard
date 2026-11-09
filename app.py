@@ -9,6 +9,7 @@ from flask import Flask, request, session, jsonify, send_from_directory
 from werkzeug.utils import redirect
 
 import db
+from paths import STATIC_DIR, DATA_DIR
 import kpi
 from feed_sync import (
     FeedClient, FeedError, fetch_attestation_reports, fetch_overall_report, fetch_sellers_report, fetch_trainees,
@@ -25,7 +26,7 @@ from aggregate import (
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-INSTANCE_DIR = os.path.join(BASE_DIR, "data")
+INSTANCE_DIR = DATA_DIR
 SECRETS_PATH = os.path.join(INSTANCE_DIR, "secrets.json")
 
 WORDS_A = ["sunny", "steady", "bright", "clear", "green", "swift", "solid", "prime"]
@@ -49,7 +50,7 @@ def load_or_create_secrets():
 
 SECRETS = load_or_create_secrets()
 
-app = Flask(__name__, static_folder="static", static_url_path="/static")
+app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="/static")
 app.secret_key = SECRETS["flask_secret_key"]
 app.json.sort_keys = False  # preserve insertion order (e.g. distribution buckets lt40..gte90)
 # The app is also served from this subpath (https://host/retail-lnd/). Requests
@@ -57,6 +58,7 @@ app.json.sort_keys = False  # preserve insertion order (e.g. distribution bucket
 # the prefix and when it strips it; the root URL keeps working too.
 # Override with the URL_PREFIX env var (empty value disables the prefix).
 URL_PREFIX = os.environ.get("URL_PREFIX", "/retail-lnd").rstrip("/")
+print(f"static dir: {STATIC_DIR} | data dir: {DATA_DIR} | url prefix: {URL_PREFIX!r}", flush=True)
 app.config.update(
     # unique name so the cookie doesn't clash with other apps on the same host
     SESSION_COOKIE_NAME="comfy_training_session",

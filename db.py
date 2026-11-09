@@ -2,7 +2,9 @@ import sqlite3
 import os
 import json
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "dashboard.db")
+from paths import DATA_DIR
+
+DB_PATH = os.path.join(DATA_DIR, "dashboard.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS periods (
