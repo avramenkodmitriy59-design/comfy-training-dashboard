@@ -942,6 +942,7 @@ function resolveSelectedPeriod() {
 async function refreshAll() {
   if (state.tab === 'trainees') { await renderTraineesView(); return; }
   if (state.tab === 'kpi') { await renderKpiView(); return; }
+  if (state.tab === 'reserve') { await renderReserveView(); return; }
   const { streamType, streamKey } = currentStream();
   const contentArea = document.getElementById('content-area');
 
@@ -2271,6 +2272,14 @@ function openUploadModal() {
           <div class="field-hint" style="margin-top:8px;">Обери проєкт зі списку (щоб не створити дублікат через одрук), AEP, або «+ Новий проєкт», якщо його ще немає.</div>
         </div>
 
+        <div class="field-group">
+          <label>Кадровий резерв (Leader Hub)</label>
+          <input type="file" id="up-reserve" accept=".xls,.xlsx" multiple>
+          <div class="field-hint">Файл учасників Leader Hub (аркуші «Учасники» і, за бажанням, «Магазини») та/або «Історія працівника» з BI «Аналітика. Роздріб». Тип файлу визначається автоматично. Учасники замінюють лише ті потоки, що є у файлі; історія замінюється повністю.</div>
+          <button type="button" class="btn btn-secondary btn-sm" id="up-reserve-go" style="margin-top:6px;">Завантажити для кадрового резерву</button>
+          <div class="field-hint" id="up-reserve-status"></div>
+        </div>
+
         <div id="upload-preview"></div>
         <div id="upload-error" class="error-text"></div>
 
@@ -2294,6 +2303,83 @@ function openUploadModal() {
     updateProjectLastUpdatedHint(v);
   });
   document.getElementById('up-parse').onclick = handleParseFiles;
+  document.getElementById('up-reserve-go').onclick = handleReserveUpload;
+}
+
+/* ---- Кадровий резерв uploads: participants file / BI employee history ---- */
+
+// Excel serial or "YYYY-MM-DD…" text -> "YYYY-MM-DD"
+function excelIsoDate(v) {
+  if (v === null || v === undefined || v === '') return '';
+  if (typeof v === 'number') return new Date(Math.round((v - 25569) * 86400000)).toISOString().slice(0, 10);
+  const s = String(v).trim();
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/) || s.match(/^(\d{2})\.(\d{2})\.(\d{4})/);
+  if (!m) return '';
+  return m[1].length === 4 ? `${m[1]}-${m[2]}-${m[3]}` : `${m[3]}-${m[2]}-${m[1]}`;
+}
+
+function sheetRowsByHeader(sheet, required) {
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true });
+  const hi = rows.findIndex((r) => r && required.every((h) => r.map((c) => String(c ?? '').trim()).includes(h)));
+  if (hi < 0) return null;
+  const cols = rows[hi].map((c) => String(c ?? '').trim());
+  return { idx: (h) => cols.indexOf(h), rows: rows.slice(hi + 1).filter((r) => r && r.length) };
+}
+
+async function handleReserveUpload() {
+  const files = Array.from(document.getElementById('up-reserve').files || []);
+  const statusEl = document.getElementById('up-reserve-status');
+  const btn = document.getElementById('up-reserve-go');
+  if (!files.length) { statusEl.textContent = 'Оберіть файл.'; return; }
+  btn.disabled = true;
+  try {
+    for (const file of files) {
+      statusEl.textContent = `Читаю «${file.name}»…`;
+      const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+      const history = sheetRowsByHeader(wb.Sheets[wb.SheetNames[0]], ['Таб номер', 'ПІБ', 'Посада', 'Магазин', 'Дата початку', 'Дата кінця']);
+      const partSheet = wb.Sheets['Учасники'] || wb.Sheets[wb.SheetNames[0]];
+      const parts = sheetRowsByHeader(partSheet, ['Програма', 'Потік', 'ПІБ', 'Статус']);
+      if (history) {
+        const i = history.idx;
+        const rows = history.rows.filter((r) => r[i('Таб номер')] !== undefined && r[i('Таб номер')] !== '').map((r) => [
+          String(r[i('Таб номер')]).trim(), r[i('ПІБ')], r[i('Посада')], r[i('Магазин')], r[i('Статус')],
+          excelIsoDate(r[i('Дата початку')]), excelIsoDate(r[i('Дата кінця')]),
+        ]);
+        const size = 4000;
+        const total = Math.ceil(rows.length / size);
+        for (let p = 0; p < total; p++) {
+          statusEl.textContent = `Історія працівника: ${Math.round((p / total) * 100)}%…`;
+          await api('/api/upload-employee-history', { method: 'POST', body: JSON.stringify({ rows: rows.slice(p * size, (p + 1) * size), part: p, parts: total }) });
+        }
+        showToast(`Історію працівника завантажено: ${fmtNum(rows.length)} рядків.`);
+      } else if (parts) {
+        const i = parts.idx;
+        const participants = parts.rows.filter((r) => r[i('ПІБ')]).map((r) => ({
+          program: r[i('Програма')], year: r[i('Потік')], tab: r[i('Таб. номер')], name: r[i('ПІБ')],
+          region: r[i('Регіон')], store: r[i('Магазин')], position: r[i('Стартова посада')],
+          test: r[i('Тест %')], dz: r[i('ДЗ %')], status: r[i('Статус')], passed1: r[i('Пройшов 1 етап')],
+        }));
+        const st = wb.Sheets['Магазини'] ? sheetRowsByHeader(wb.Sheets['Магазини'], ['Регіон', 'Магазин']) : null;
+        const stores = st ? st.rows.map((r) => [r[st.idx('Регіон')], r[st.idx('Магазин')]]) : [];
+        // optional sheet «Потоки»: Програма, Потік, Старт, Завершення
+        const sp = wb.Sheets['Потоки'] ? sheetRowsByHeader(wb.Sheets['Потоки'], ['Програма', 'Потік']) : null;
+        const streams = sp ? sp.rows.filter((r) => r[sp.idx('Потік')]).map((r) => ({
+          program: r[sp.idx('Програма')], year: r[sp.idx('Потік')], dateStart: excelIsoDate(r[sp.idx('Старт')]), dateEnd: excelIsoDate(r[sp.idx('Завершення')]),
+        })) : [];
+        const resp = await api('/api/upload-lh-participants', { method: 'POST', body: JSON.stringify({ participants, stores, streams }) });
+        showToast(`Учасників Leader Hub завантажено: ${resp.participants}${resp.stores ? `, магазинів: ${resp.stores}` : ''}.`);
+      } else {
+        throw new Error(`«${file.name}»: не схожий ні на файл учасників Leader Hub, ні на «Історію працівника».`);
+      }
+    }
+    statusEl.textContent = 'Готово.';
+    if (state.reserve) state.reserve.data = null;
+    if (state.tab === 'reserve') await refreshAll();
+  } catch (e) {
+    statusEl.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function updateProjectLastUpdatedHint(value) {
@@ -2909,6 +2995,328 @@ function renderTraineeList(scoped) {
     : `Показано ${rows.length}.`;
 }
 
+/* ===================== Кадровий резерв (Leader Hub) ===================== */
+
+// The tab itself lives in static/js/reserve.js (LeaderHub.mount — tabs
+// Кадровий резерв / Leader Hub 1.0 / 2.0, built on the team's prototype);
+// here: loading /api/reserve and the editing actions it calls back into.
+const LH_PROGRAMS = { LH1: 'LH 1.0', LH2: 'LH 2.0' };
+
+async function renderReserveView() {
+  const area = document.getElementById('content-area');
+  const rs = state.reserve || (state.reserve = { data: null });
+  if (!rs.data) {
+    area.innerHTML = '<div class="card"><span class="spinner"></span> Завантаження…</div>';
+    rs.data = await api('/api/reserve');
+  }
+  const { uploads } = rs.data;
+  if (!uploads.lh_participants && !rs.data.streams.length) {
+    area.innerHTML = `
+      <div class="empty-state">
+        <h2>Ще немає даних</h2>
+        <p>«Завантажити дані вручну» → «Кадровий резерв»: файл учасників Leader Hub і «Історія працівника» з BI.</p>
+      </div>`;
+    return;
+  }
+  const note = () => {
+    const ups = rs.data.uploads;
+    const up = (k) => (ups[k] ? `${fmtNum(ups[k].rows)} · ${fmtUploadedAt(ups[k].uploadedAt)}` : 'не завантажено');
+    const unmatched = Object.values(rs.data.people).filter((p) => !p.matchedBy).length;
+    return `Учасники: ${up('lh_participants')} · Історія працівника (BI): ${up('employee_history')}${unmatched ? ` · <span class="error-text">не знайдено в історії: ${unmatched}</span>` : ''}`;
+  };
+  area.innerHTML = `<div class="last-updated-note" id="lh-note">${note()}</div><div id="lh-mount"></div>`;
+  // after an edit: fetch fresh numbers and re-render in place (no spinner,
+  // same tab / filters / scroll)
+  const reload = async () => {
+    rs.data = await api('/api/reserve');
+    const n = document.getElementById('lh-note');
+    if (n) n.innerHTML = note();
+    LeaderHub.update(rs.data);
+  };
+  LeaderHub.mount(document.getElementById('lh-mount'), rs.data, {
+    settings: (prog) => openLhSettingsModal(prog, reload),
+    newStream: (prog) => openNewStreamModal(prog),
+    addParticipant: (prog, year) => openAddParticipantModal(prog, year),
+    deleteStream: async (prog, year) => {
+      try { await api(`/api/lh-streams/${prog}/${year}`, { method: 'DELETE' }); await reload(); } catch (err) { showToast(err.message, true); }
+    },
+    setStatus: async (part, status) => {
+      try { await api(`/api/lh-participants/${part.id}`, { method: 'PATCH', body: JSON.stringify({ status }) }); showToast('Статус змінено'); await reload(); } catch (err) { showToast(err.message, true); }
+    },
+    setReserveStatus: async (entry, status, note) => {
+      try {
+        await api('/api/reserve-status', { method: 'PUT', body: JSON.stringify({ pid: entry.pid, program: entry.prog, status, note }) });
+        showToast(status ? 'Статус резерву збережено' : 'Повернуто автостатус');
+        await reload();
+      } catch (err) { showToast(err.message, true); }
+    },
+    addPotential: (prog) => openAddPotentialModal(prog, reload),
+    removeParticipant: async (part, name) => {
+      if (!confirm(`Прибрати ${name} з потоку ${LH_PROGRAMS[part.prog]} · ${part.year}?`)) return;
+      try { await api(`/api/lh-participants/${part.id}`, { method: 'DELETE' }); await reload(); } catch (err) { showToast(err.message, true); }
+    },
+  });
+}
+
+// ⚙️ Налаштування Leader Hub: pick the project (LH 1.0 / 2.0), then its
+// streams — dates, participants (add / remove), new stream, delete empty
+function openLhSettingsModal(program, reload, sel = {}) {
+  const st = { program: sel.program || program || 'LH1', year: sel.year || null, q: '', changed: !!sel.changed };
+  const root = document.getElementById('modal-root');
+  const refresh = async () => { state.reserve.data = await api('/api/reserve'); st.changed = true; draw(); };
+  const done = async () => { closeModal(); if (st.changed) await reload(); };
+  const reopen = (changed) => openLhSettingsModal(program, reload, { program: st.program, year: st.year, changed: st.changed || changed });
+  function draw() {
+    const data = state.reserve.data;
+    const parts = data.parts.filter((x) => x.prog === st.program);
+    const count = {};
+    parts.forEach((x) => { count[x.year] = (count[x.year] || 0) + 1; });
+    const streams = data.streams.filter((s) => s.program === st.program).sort((a, b) => b.year - a.year);
+    if (st.year && !streams.some((s) => s.year === st.year)) st.year = null;
+    if (!st.year && streams.length) st.year = streams[0].year;
+    const people = parts.filter((x) => x.year === st.year)
+      .map((x) => Object.assign({}, x, { name: (data.people[x.pid] || {}).name || '', tab: (data.people[x.pid] || {}).tab || '' }))
+      .filter((x) => !st.q || x.name.toLowerCase().includes(st.q.toLowerCase()) || x.tab === st.q)
+      .sort((a, b) => a.name.localeCompare(b.name, 'uk'));
+    const progBtn = (p, label) => `<button class="tab-btn ${st.program === p ? 'active' : ''}" data-prog="${p}">${label}</button>`;
+    root.innerHTML = `
+      <div class="modal-backdrop" id="ls-backdrop"><div class="modal" style="max-width:900px;">
+        <button class="modal-close" id="ls-close">✕</button>
+        <h2>⚙️ Налаштування Leader Hub</h2>
+        <div class="field-group"><label>1. Проєкт</label>
+          <div class="tabs small" id="ls-prog">${progBtn('LH1', 'Leader Hub 1.0 · резерв на Заступника')}${progBtn('LH2', 'Leader Hub 2.0 · резерв на Директора')}</div></div>
+        <div class="field-group"><label>2. Потоки й період проведення</label>
+          <p class="modal-subtitle" style="margin:0 0 8px;">Від дати старту рахуються призначення й «Швидкість виходу на посаду». Оберіть потік, щоб керувати учасниками.</p>
+          <div class="table-scroll"><table class="data-table">
+            <thead><tr><th>Потік</th><th>Старт</th><th>Завершення</th><th class="num">Учасників</th><th></th></tr></thead>
+            <tbody>${streams.map((s) => `
+              <tr data-year="${s.year}" class="row-clickable ${s.year === st.year ? 'ls-active' : ''}">
+                <td><b>${s.year}</b></td>
+                <td><input type="date" class="ls-start" value="${s.date_start || ''}"></td>
+                <td><input type="date" class="ls-end" value="${s.date_end || ''}"></td>
+                <td class="num">${count[s.year] || 0}</td>
+                <td style="white-space:nowrap; text-align:right;">${s.year === st.year ? '<span class="muted">обрано ▾</span>' : '<button class="btn btn-secondary btn-sm ls-pick">Учасники</button>'}
+                  ${count[s.year] ? '' : '<button class="btn btn-secondary btn-sm ls-del">Видалити</button>'}</td></tr>`).join('')
+              || '<tr><td colspan="5" class="muted">Потоків ще немає</td></tr>'}</tbody>
+          </table></div>
+          <button class="btn btn-secondary btn-sm" id="ls-new" style="margin-top:8px;">+ Новий потік ${LH_PROGRAMS[st.program]}</button>
+        </div>
+        ${st.year ? `
+        <div class="field-group"><label>3. Учасники потоку ${LH_PROGRAMS[st.program]} · ${st.year} — ${count[st.year] || 0}</label>
+          <div style="display:flex; gap:10px; align-items:center; margin-bottom:8px;">
+            <input type="search" class="search-input" id="ls-q" placeholder="ПІБ або таб. номер" value="${escapeHtml(st.q)}" style="flex:1;">
+            <button class="btn btn-primary btn-sm" id="ls-add">+ Додати учасників</button></div>
+          <div class="table-scroll" style="max-height:320px;"><table class="data-table">
+            <thead><tr><th>ПІБ</th><th>Таб. №</th><th>Стартова посада</th><th>Магазин</th><th>Статус</th><th></th></tr></thead>
+            <tbody>${people.map((x) => `<tr data-id="${x.id}" data-name="${escapeHtml(x.name)}">
+              <td>${escapeHtml(x.name)}</td><td>${escapeHtml(x.tab || '—')}</td><td>${escapeHtml(x.pos_in || '')}</td>
+              <td>${escapeHtml(x.store || '')}</td><td>${escapeHtml(x.status)}</td>
+              <td><button class="btn btn-secondary btn-sm ls-rm" title="Прибрати з потоку">✕</button></td></tr>`).join('')
+              || `<tr><td colspan="6" class="muted">${st.q ? 'Нікого не знайдено' : 'Учасників ще немає — «+ Додати учасників»'}</td></tr>`}</tbody>
+          </table></div>
+        </div>` : ''}
+        <div id="ls-error" class="error-text"></div>
+        <div class="modal-actions"><button class="btn btn-secondary" id="ls-done">Готово</button></div>
+      </div></div>`;
+    const $id = (id) => document.getElementById(id);
+    const err = (e) => { $id('ls-error').textContent = e.message; };
+    $id('ls-close').onclick = done;
+    $id('ls-done').onclick = done;
+    root.querySelectorAll('#ls-prog .tab-btn').forEach((b) => b.addEventListener('click', () => { st.program = b.dataset.prog; st.year = null; st.q = ''; draw(); }));
+    $id('ls-new').onclick = () => openNewStreamModal(st.program);
+    root.querySelectorAll('tbody tr[data-year]').forEach((tr) => {
+      const year = Number(tr.dataset.year);
+      const save = async () => {
+        try {
+          await api('/api/lh-streams', { method: 'POST', body: JSON.stringify({ program: st.program, year, dateStart: tr.querySelector('.ls-start').value, dateEnd: tr.querySelector('.ls-end').value }) });
+          showToast(`Дати потоку ${LH_PROGRAMS[st.program]} · ${year} збережено`);
+          const keep = $id('ls-q') ? $id('ls-q').value : '';
+          st.q = keep; await refresh();
+        } catch (e) { err(e); }
+      };
+      tr.querySelector('.ls-start').addEventListener('change', save);
+      tr.querySelector('.ls-end').addEventListener('change', save);
+      tr.querySelectorAll('input').forEach((i) => i.addEventListener('click', (e) => e.stopPropagation()));
+      tr.addEventListener('click', (e) => { if (e.target.closest('.ls-del')) return; st.year = year; st.q = ''; draw(); });
+      const del = tr.querySelector('.ls-del');
+      if (del) del.onclick = async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Видалити порожній потік ${LH_PROGRAMS[st.program]} · ${year}?`)) return;
+        try { await api(`/api/lh-streams/${st.program}/${year}`, { method: 'DELETE' }); showToast('Потік видалено'); await refresh(); } catch (e2) { err(e2); }
+      };
+    });
+    if (!st.year) return;
+    const q = $id('ls-q');
+    q.addEventListener('input', debounce(() => { st.q = q.value.trim(); draw(); const n = $id('ls-q'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }, 250));
+    $id('ls-add').onclick = () => openAddParticipantModal(st.program, st.year, reopen);
+    root.querySelectorAll('.ls-rm').forEach((b) => b.addEventListener('click', async () => {
+      const tr = b.closest('tr');
+      if (!confirm(`Прибрати ${tr.dataset.name} з потоку ${LH_PROGRAMS[st.program]} · ${st.year}?`)) return;
+      try { await api(`/api/lh-participants/${tr.dataset.id}`, { method: 'DELETE' }); showToast('Прибрано з потоку'); await refresh(); } catch (e) { err(e); }
+    }));
+  }
+  draw();
+}
+
+function openNewStreamModal(program = 'LH1') {
+  const root = document.getElementById('modal-root');
+  root.innerHTML = `
+    <div class="modal-backdrop" id="ns-backdrop"><div class="modal" style="max-width:720px;">
+      <button class="modal-close" id="ns-close">✕</button>
+      <h2>Новий потік Leader Hub</h2>
+      <div style="display:flex; gap:16px; flex-wrap:wrap;">
+        <div class="field-group"><label>Програма</label>
+          <select id="ns-program"><option value="LH1" ${program === 'LH1' ? 'selected' : ''}>LH 1.0 — резерв на заступника</option><option value="LH2" ${program === 'LH2' ? 'selected' : ''}>LH 2.0 — резерв на директора</option></select></div>
+        <div class="field-group"><label>Рік потоку</label><input type="number" id="ns-year" value="${new Date().getFullYear()}" style="width:110px;"></div>
+        <div class="field-group"><label>Дати (необов'язково)</label>
+          <div style="display:flex; gap:8px;"><input type="date" id="ns-start"><input type="date" id="ns-end"></div></div>
+      </div>
+      <div class="field-group"><label>Учасники <span class="muted" id="ns-count"></span></label>
+        <div id="ns-selected" class="ns-selected"></div>
+        <input type="text" class="search-input" id="ns-q" placeholder="Пошук в «Історії працівника»: прізвище або таб. номер…" style="width:100%;">
+        <div class="table-scroll" style="margin-top:10px; max-height:300px;"><table class="data-table" id="ns-results"></table></div>
+      </div>
+      <div id="ns-error" class="error-text"></div>
+      <div class="modal-actions"><button class="btn btn-secondary" id="ns-cancel">Скасувати</button><button class="btn btn-primary" id="ns-save">Створити</button></div>
+    </div></div>`;
+  const $id = (id) => document.getElementById(id);
+  const picked = new Map(); // tab -> employee
+  let found = [];
+  const empLine = (e) => `${escapeHtml(e.position)}<div class="muted">${escapeHtml(e.store || '')}${e.region ? ` · ${escapeHtml(e.region)}` : ''}</div>`;
+  const renderPicked = () => {
+    $id('ns-count').textContent = picked.size ? `· обрано ${picked.size}` : '';
+    $id('ns-save').textContent = picked.size ? `Створити потік і додати ${picked.size}` : 'Створити';
+    $id('ns-selected').innerHTML = [...picked.values()].map((e) => `
+      <span class="ns-chip">${escapeHtml(e.name)} <span class="muted">${escapeHtml(e.position)}</span>
+      <button type="button" class="ns-chip-x" data-tab="${escapeHtml(e.tab)}" title="Прибрати">✕</button></span>`).join('');
+    $id('ns-selected').querySelectorAll('.ns-chip-x').forEach((b) => b.addEventListener('click', () => { picked.delete(b.dataset.tab); renderPicked(); renderFound(); }));
+  };
+  const renderFound = () => {
+    const q = $id('ns-q').value.trim();
+    const t = $id('ns-results');
+    t.innerHTML = found.map((e) => {
+      const on = picked.has(e.tab);
+      return `<tr><td>${escapeHtml(e.name)}<div class="muted">таб. ${escapeHtml(e.tab)}</div></td>
+        <td>${empLine(e)}</td>
+        <td>${e.working ? '' : '<span class="muted">не працює</span>'}</td>
+        <td><button class="btn ${on ? 'btn-primary' : 'btn-secondary'} btn-sm ns-pick" data-tab="${escapeHtml(e.tab)}">${on ? 'Обрано ✓' : 'Обрати'}</button></td></tr>`;
+    }).join('') || (q.length >= 2 ? '<tr><td class="muted">Нікого не знайдено</td></tr>' : '');
+    t.querySelectorAll('.ns-pick').forEach((b) => b.addEventListener('click', () => {
+      const e = found.find((x) => x.tab === b.dataset.tab);
+      if (picked.has(e.tab)) picked.delete(e.tab); else picked.set(e.tab, e);
+      renderPicked(); renderFound();
+    }));
+  };
+  $id('ns-close').onclick = closeModal;
+  $id('ns-cancel').onclick = closeModal;
+  $id('ns-q').addEventListener('input', debounce(async () => {
+    const q = $id('ns-q').value.trim();
+    found = q.length >= 2 ? (await api(`/api/employees/search?${qs({ q })}`)).employees : [];
+    renderFound();
+  }, 300));
+  renderPicked();
+  $id('ns-save').onclick = async () => {
+    const program = $id('ns-program').value;
+    const year = $id('ns-year').value;
+    const btn = $id('ns-save');
+    btn.disabled = true;
+    try {
+      await api('/api/lh-streams', { method: 'POST', body: JSON.stringify({ program, year, dateStart: $id('ns-start').value, dateEnd: $id('ns-end').value }) });
+      const failed = [];
+      for (const e of picked.values()) {
+        try { await api('/api/lh-participants', { method: 'POST', body: JSON.stringify({ program, year, tab: e.tab }) }); }
+        catch (err) { failed.push(`${e.name}: ${err.message}`); }
+      }
+      closeModal();
+      LeaderHub.setYear(year);
+      state.reserve.data = null;
+      await renderReserveView();
+      const ok = picked.size - failed.length;
+      showToast(failed.length ? `Потік створено, додано ${ok}; не додано: ${failed.join('; ')}` : ok ? `Потік створено, додано учасників: ${ok}` : 'Потік створено — додайте учасників', failed.length > 0);
+    } catch (e) { $id('ns-error').textContent = e.message; btn.disabled = false; }
+  };
+}
+
+// «Статуси резерву» → mark someone (in or outside the programmes) as
+// «Потенційний» — who could be brought into the programme
+function openAddPotentialModal(program, reload) {
+  const root = document.getElementById('modal-root');
+  root.innerHTML = `
+    <div class="modal-backdrop" id="pp-backdrop"><div class="modal" style="max-width:680px;">
+      <button class="modal-close" id="pp-close">✕</button>
+      <h2>Додати потенційного</h2>
+      <p class="modal-subtitle">Кого можна залучити в програму. Пошук серед тих, хто працює, в «Історії працівника».</p>
+      <div class="field-group"><label>Потенційний на</label>
+        <select id="pp-program"><option value="TZ" ${program === 'TZ' ? 'selected' : ''}>Товарознавця</option><option value="LH1" ${program === 'LH1' ? 'selected' : ''}>Заступника (LH 1.0)</option><option value="LH2" ${program === 'LH2' ? 'selected' : ''}>Директора (LH 2.0)</option></select></div>
+      <div class="field-group"><label>Коментар (необов'язково)</label><input type="text" id="pp-note" style="width:100%;" placeholder="напр., рекомендація регіону"></div>
+      <input type="text" class="search-input" id="pp-q" placeholder="Прізвище або таб. номер…" style="width:100%;">
+      <div class="table-scroll" style="margin-top:10px; max-height:300px;"><table class="data-table" id="pp-results"></table></div>
+      <div id="pp-error" class="error-text"></div>
+      <div class="modal-actions"><button class="btn btn-secondary" id="pp-done">Готово</button></div>
+    </div></div>`;
+  const $id = (id) => document.getElementById(id);
+  let added = false;
+  const done = async () => { closeModal(); if (added) await reload(); };
+  $id('pp-close').onclick = done;
+  $id('pp-done').onclick = done;
+  $id('pp-q').focus();
+  $id('pp-q').addEventListener('input', debounce(async () => {
+    const q = $id('pp-q').value.trim();
+    const data = q.length >= 2 ? await api(`/api/employees/search?${qs({ q })}`) : { employees: [] };
+    const t = $id('pp-results');
+    t.innerHTML = data.employees.map((e) => `
+      <tr><td>${escapeHtml(e.name)}<div class="muted">таб. ${escapeHtml(e.tab)}</div></td>
+      <td>${escapeHtml(e.position)}<div class="muted">${escapeHtml(e.store || '')}${e.region ? ` · ${escapeHtml(e.region)}` : ''}</div></td>
+      <td><button class="btn btn-secondary btn-sm ns-pick" data-tab="${escapeHtml(e.tab)}">Додати</button></td></tr>`).join('')
+      || (q.length >= 2 ? '<tr><td class="muted">Нікого не знайдено</td></tr>' : '');
+    t.querySelectorAll('.ns-pick').forEach((b) => b.addEventListener('click', async () => {
+      try {
+        await api('/api/reserve-status', { method: 'PUT', body: JSON.stringify({ pid: b.dataset.tab, program: $id('pp-program').value, status: 'Потенційний', note: $id('pp-note').value }) });
+        added = true; b.disabled = true; b.textContent = 'Додано ✓';
+      } catch (err) { $id('pp-error').textContent = err.message; }
+    }));
+  }, 300));
+}
+
+function openAddParticipantModal(program, year, onDone) {
+  const root = document.getElementById('modal-root');
+  root.innerHTML = `
+    <div class="modal-backdrop" id="ap-backdrop"><div class="modal" style="max-width:640px;">
+      <button class="modal-close" id="ap-close">✕</button>
+      <h2>Додати учасника · ${LH_PROGRAMS[program]} · ${year}</h2>
+      <p class="modal-subtitle">Пошук у «Історії працівника» за ПІБ або табельним номером. Стартові посада й магазин — поточні.</p>
+      <input type="text" class="search-input" id="ap-q" placeholder="Прізвище або таб. номер…" style="width:100%;">
+      <div class="table-scroll" style="margin-top:10px;"><table class="data-table" id="ap-results"></table></div>
+      <div id="ap-error" class="error-text"></div>
+      <div class="modal-actions"><button class="btn btn-secondary" id="ap-done">Готово</button></div>
+    </div></div>`;
+  let added = false;
+  const done = async () => {
+    if (onDone) { if (added) state.reserve.data = await api('/api/reserve'); onDone(added); return; } // back to ⚙️ Налаштування
+    closeModal(); if (added) { state.reserve.data = null; await renderReserveView(); }
+  };
+  document.getElementById('ap-close').onclick = done;
+  document.getElementById('ap-done').onclick = done;
+  const input = document.getElementById('ap-q');
+  input.focus();
+  input.addEventListener('input', debounce(async () => {
+    const data = await api(`/api/employees/search?${qs({ q: input.value.trim() })}`);
+    const t = document.getElementById('ap-results');
+    t.innerHTML = data.employees.map((e) => `
+      <tr><td>${escapeHtml(e.name)}<div class="muted">таб. ${escapeHtml(e.tab)}</div></td>
+      <td>${escapeHtml(e.position)}<div class="muted">${escapeHtml(e.store || '')}${e.region ? ` · ${escapeHtml(e.region)}` : ''}</div></td>
+      <td>${e.working ? '' : '<span class="muted">не працює</span>'}</td>
+      <td><button class="btn btn-secondary btn-sm ap-add" data-tab="${escapeHtml(e.tab)}">Додати</button></td></tr>`).join('')
+      || (input.value.trim().length >= 2 ? '<tr><td class="muted">Нікого не знайдено</td></tr>' : '');
+    t.querySelectorAll('.ap-add').forEach((b) => b.addEventListener('click', async () => {
+      try {
+        await api('/api/lh-participants', { method: 'POST', body: JSON.stringify({ program, year, tab: b.dataset.tab }) });
+        added = true; b.disabled = true; b.textContent = 'Додано';
+      } catch (err) { document.getElementById('ap-error').textContent = err.message; }
+    }));
+  }, 300));
+}
+
 /* ===================== KPI 2027 ===================== */
 
 // "KPI відділу навчання Роздрібу 2027": per-role KPIs computed on the
@@ -2968,7 +3376,7 @@ async function renderKpiView() {
         ? `<div class="kpi-manual" data-kpi="${kp.key}">
             ${kp.manual.map((m) => `<label>${escapeHtml(m.label)}<input type="text" inputmode="decimal" data-input="${m.key}" value="${m.value ?? ''}"></label>`).join('')}
             <button class="btn btn-secondary btn-sm kpi-save">Зберегти</button>
-            ${kp.fact !== null && kp.manual.length > 1 ? `<div class="muted">= ${fmtKpiValue(kp.fact, kp.unit)}</div>` : ''}
+            ${kp.fact !== null && (kp.manual.length > 1 || kp.factNote) ? `<div class="muted">= ${fmtKpiValue(kp.fact, kp.unit)}${kp.factNote ? ` (${escapeHtml(kp.factNote)}; поля вище — щоб перевизначити)` : ''}</div>` : ''}
           </div>`
         : fmtKpiValue(kp.fact, kp.unit);
       return `

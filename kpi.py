@@ -209,6 +209,18 @@ def _fact(key, data, quarters, own_positions):
     return None
 
 
+def _appointments_fact(conn, quarters):
+    """ВП / (ВП + ЗП) from "Історія працівника" (see reserve.appointments),
+    with a "ВП n · ЗП m" note; (None, None) when no history is loaded."""
+    import reserve
+    counts = reserve.appointments(conn, quarters)
+    vp = sum(c["ВП"] for c in counts.values())
+    zp = sum(c["ЗП"] for c in counts.values())
+    if not vp + zp:
+        return None, None
+    return vp * 100 / (vp + zp), f"з Історії працівника: ВП {vp} · ЗП {zp}"
+
+
 def compute(conn, period_key, own_positions, manual_values):
     """manual_values: {kpi_key: {input_key: number}} for this period."""
     data = KpiData(conn)
@@ -228,10 +240,15 @@ def compute(conn, period_key, own_positions, manual_values):
                 target = base * GROWTH
             values = (manual_values or {}).get(key) or {}
             fact = manual["compute"](values) if manual else _fact(key, data, quarters, own)
+            fact_note = None
+            if key == "internal_appointments" and fact is None:
+                # no manual override: count from the BI employee history
+                fact, fact_note = _appointments_fact(conn, quarters)
             achievement = min(fact / target, ACHIEVEMENT_CAP) if fact is not None and target else None
             kpis.append({
                 "key": key, "name": name, "how": how, "weight": weight, "unit": unit,
-                "base": base, "baseNote": base_note, "target": target, "fact": fact, "achievement": achievement,
+                "base": base, "baseNote": base_note, "target": target, "fact": fact, "factNote": fact_note,
+                "achievement": achievement,
                 "manual": [{"key": k, "label": lbl, "value": values.get(k)} for k, lbl in manual["inputs"]]
                 if manual else None,
             })

@@ -94,6 +94,69 @@ CREATE TABLE IF NOT EXISTS trainees (
 );
 CREATE INDEX IF NOT EXISTS idx_trainees_month ON trainees(year, month);
 
+-- "Кадровий резерв" (Leader Hub): participants file (one row per person per
+-- stream, replaced as a whole on upload), store -> region map (the employee
+-- history has no region), and the employee position history from BI
+-- "Аналітика. Роздріб" -> "Історія працівника" (replaced as a whole; loaded
+-- in chunks into the staging table, then swapped in — see app.py).
+CREATE TABLE IF NOT EXISTS lh_participants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    program TEXT NOT NULL,          -- LH1 / LH2
+    year INTEGER NOT NULL,
+    tab TEXT,
+    name TEXT NOT NULL,
+    region TEXT,
+    store TEXT,
+    position TEXT,
+    test REAL,
+    dz REAL,
+    status TEXT,
+    passed1 INTEGER
+);
+-- Leader Hub streams (programme + year), created from a participants file
+-- or by hand on the site; participants can be added from the employee history.
+CREATE TABLE IF NOT EXISTS lh_streams (
+    program TEXT NOT NULL,
+    year INTEGER NOT NULL,
+    date_start TEXT,
+    date_end TEXT,
+    PRIMARY KEY (program, year)
+);
+-- reserve status set by hand ("Статуси резерву"), per person and programme;
+-- pid = tab number (or p<participant id> when not found in the history).
+-- Kept apart from lh_participants so re-uploading the participants file
+-- does not wipe it.
+CREATE TABLE IF NOT EXISTS reserve_status (
+    pid TEXT NOT NULL,
+    program TEXT NOT NULL,
+    status TEXT NOT NULL,
+    note TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (pid, program)
+);
+CREATE TABLE IF NOT EXISTS store_regions (
+    store TEXT PRIMARY KEY,
+    region TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS employee_history (
+    tab TEXT NOT NULL,
+    name TEXT,
+    position TEXT,
+    store TEXT,
+    status TEXT,
+    date_start TEXT,
+    date_end TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_employee_history_tab ON employee_history(tab);
+CREATE TABLE IF NOT EXISTS employee_history_staging (
+    tab TEXT NOT NULL, name TEXT, position TEXT, store TEXT, status TEXT, date_start TEXT, date_end TEXT
+);
+CREATE TABLE IF NOT EXISTS data_uploads (
+    kind TEXT PRIMARY KEY,
+    rows INTEGER,
+    uploaded_at TEXT NOT NULL
+);
+
 -- KPI page: values for KPIs with no data source yet (retail plan, internal
 -- appointments, 2nd category, knowledge by category), per period ("2027-H1").
 CREATE TABLE IF NOT EXISTS kpi_manual (

@@ -11,6 +11,7 @@ from werkzeug.utils import redirect
 import db
 from paths import STATIC_DIR, DATA_DIR
 import kpi
+import reserve
 from feed_sync import (
     FeedClient, FeedError, fetch_attestation_reports, fetch_overall_report, fetch_sellers_report, fetch_trainees,
     trainee_success, dismissed_during_internship, trainee_failure_reasons, TRAINEE_TYPE_LABELS,
@@ -464,6 +465,324 @@ def feed_sync():
     if not saved and not skipped:
         return jsonify({"error": f"У Feed немає атестаційних занять за {label}"}), 404
     return jsonify({"ok": True, "label": label, "saved": saved, "skipped": skipped})
+
+
+# ---------- Кадровий резерв (Leader Hub) ----------
+
+def _mark_upload(conn, kind, rows):
+    conn.execute(
+        "INSERT INTO data_uploads (kind, rows, uploaded_at) VALUES (?,?,?) "
+        "ON CONFLICT(kind) DO UPDATE SET rows = excluded.rows, uploaded_at = excluded.uploaded_at",
+        (kind, rows, datetime.datetime.utcnow().isoformat() + "Z"),
+    )
+
+
+@app.post("/api/upload-lh-participants")
+def upload_lh_participants():
+    """Leader Hub participants (all streams — replaces the previous list) and,
+    optionally, the store -> region map from the same file."""
+    data = request.get_json(silent=True) or {}
+    rows = data.get("participants") or []
+    stores = data.get("stores") or []
+    if not rows:
+        return jsonify({"error": "У файлі не знайдено учасників"}), 400
+
+    def num(v):
+        try:
+            return float(str(v).replace(",", ".").replace("%", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    clean = []
+    for r in rows:
+        prog = str(r.get("program") or "").upper().replace(" ", "").replace(".0", "")
+        prog = "LH2" if "2" in prog else "LH1"
+        try:
+            year = int(float(r.get("year")))
+        except (TypeError, ValueError):
+            continue
+        name = str(r.get("name") or "").strip()
+        if not name:
+            continue
+        tab = str(r.get("tab") or "").strip()
+        tab = tab[:-2] if tab.endswith(".0") else tab
+        clean.append((prog, year, tab or None, name, str(r.get("region") or "").strip(),
+                      str(r.get("store") or "").strip(), str(r.get("position") or "").strip(),
+                      num(r.get("test")), num(r.get("dz")), str(r.get("status") or "").strip(),
+                      1 if str(r.get("passed1") or "").strip().lower() in ("так", "true", "1", "yes") else 0))
+    if not clean:
+        return jsonify({"error": "Не вдалося розпізнати жодного учасника (потрібні Програма, Потік, ПІБ)"}), 400
+    conn = db.get_db()
+    try:
+        conn.execute("BEGIN")
+        # replace only the streams present in the file — streams created and
+        # filled by hand on the site stay as they are
+        for prog, year in {(c[0], c[1]) for c in clean}:
+            conn.execute("DELETE FROM lh_participants WHERE program = ? AND year = ?", (prog, year))
+            conn.execute("INSERT OR IGNORE INTO lh_streams (program, year) VALUES (?, ?)", (prog, year))
+        conn.executemany(
+            "INSERT INTO lh_participants (program, year, tab, name, region, store, position, test, dz, status, passed1) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)", clean,
+        )
+        # optional «Потоки» sheet: stream dates
+        for st in data.get("streams") or []:
+            sp = "LH2" if "2" in str(st.get("program") or "").replace(".0", "") else "LH1"
+            try:
+                sy = int(float(st.get("year")))
+            except (TypeError, ValueError):
+                continue
+            conn.execute(
+                "INSERT INTO lh_streams (program, year, date_start, date_end) VALUES (?,?,?,?) "
+                "ON CONFLICT(program, year) DO UPDATE SET date_start = COALESCE(excluded.date_start, date_start), "
+                "date_end = COALESCE(excluded.date_end, date_end)",
+                (sp, sy, st.get("dateStart") or None, st.get("dateEnd") or None),
+            )
+        store_rows = [(str(st).strip(), str(rg).strip()) for rg, st in stores if str(st or "").strip() and str(rg or "").strip()]
+        if store_rows:
+            conn.execute("DELETE FROM store_regions")
+            conn.executemany("INSERT OR REPLACE INTO store_regions (store, region) VALUES (?,?)", store_rows)
+        _mark_upload(conn, "lh_participants", len(clean))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return jsonify({"ok": True, "participants": len(clean), "stores": len(stores)})
+
+
+@app.post("/api/upload-employee-history")
+def upload_employee_history():
+    """BI "Історія працівника", sent in parts (a 130k-row file is far over a
+    typical proxy body limit). Parts accumulate in a staging table; the last
+    part swaps it in, so a failed upload never leaves a half-replaced
+    history. rows: [tab, name, position, store, status, date_start, date_end]."""
+    data = request.get_json(silent=True) or {}
+    rows = data.get("rows") or []
+    part, parts = int(data.get("part") or 0), int(data.get("parts") or 1)
+    conn = db.get_db()
+    try:
+        conn.execute("BEGIN")
+        if part == 0:
+            conn.execute("DELETE FROM employee_history_staging")
+        conn.executemany(
+            "INSERT INTO employee_history_staging (tab, name, position, store, status, date_start, date_end) "
+            "VALUES (?,?,?,?,?,?,?)",
+            [tuple(str(x or "").strip() for x in r[:7]) for r in rows if len(r) >= 7 and str(r[0] or "").strip()],
+        )
+        total = None
+        if part == parts - 1:
+            total = conn.execute("SELECT COUNT(*) FROM employee_history_staging").fetchone()[0]
+            if not total:
+                raise ValueError("empty history")
+            conn.execute("DELETE FROM employee_history")
+            conn.execute("INSERT INTO employee_history SELECT * FROM employee_history_staging")
+            conn.execute("DELETE FROM employee_history_staging")
+            _mark_upload(conn, "employee_history", total)
+        conn.commit()
+    except ValueError:
+        conn.rollback()
+        return jsonify({"error": "У файлі історії не знайдено жодного рядка"}), 400
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return jsonify({"ok": True, "part": part, "total": total})
+
+
+def _current_employee(conn, tab):
+    row = conn.execute(
+        "SELECT tab, name, position, store FROM employee_history WHERE tab = ? ORDER BY date_start DESC LIMIT 1", (tab,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+@app.get("/api/employees/search")
+def employees_search():
+    """Current state of people in the employee history, by name or tab —
+    for adding participants to a Leader Hub stream."""
+    q = (request.args.get("q") or "").strip()
+    if len(q) < 2:
+        return jsonify({"employees": []})
+    conn = db.get_db()
+    up = conn.execute("SELECT uploaded_at FROM data_uploads WHERE kind = 'employee_history'").fetchone()
+    as_of = up["uploaded_at"][:10] if up else datetime.date.today().isoformat()
+    # match in Python: SQLite LIKE ignores case only for Latin letters, and
+    # every word of the query may come in any order («ім'я прізвище»)
+    words = reserve.name_key(q).split()
+    rows = [r for r in conn.execute(
+        "SELECT h.tab, h.name, h.position, h.store, sr.region FROM employee_history h "
+        "LEFT JOIN store_regions sr ON sr.store = h.store "
+        "WHERE h.date_start = (SELECT MAX(date_start) FROM employee_history WHERE tab = h.tab) "
+        "AND h.status != 'Звільнений' AND h.date_end >= ?",
+        (as_of,),
+    ) if r["tab"] == q or (words and all(w in reserve.name_key(r["name"]) for w in words))]
+    rows.sort(key=lambda r: r["name"] or "")
+    rows = rows[:30]
+    conn.close()
+    # only people who work now (as of the employee-history upload)
+    return jsonify({"employees": [{
+        "tab": r["tab"], "name": r["name"], "position": reserve.position_info(r["position"])[0], "store": r["store"],
+        "region": r["region"], "working": True,
+    } for r in rows]})
+
+
+@app.post("/api/lh-streams")
+def lh_stream_create():
+    data = request.get_json(silent=True) or {}
+    prog = "LH2" if str(data.get("program")) == "LH2" else "LH1"
+    try:
+        year = int(data.get("year"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Вкажіть рік потоку"}), 400
+    conn = db.get_db()
+    conn.execute(
+        "INSERT INTO lh_streams (program, year, date_start, date_end) VALUES (?,?,?,?) "
+        "ON CONFLICT(program, year) DO UPDATE SET date_start = excluded.date_start, date_end = excluded.date_end",
+        (prog, year, data.get("dateStart") or None, data.get("dateEnd") or None),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.delete("/api/lh-streams/<program>/<int:year>")
+def lh_stream_delete(program, year):
+    """Only an empty stream can be removed (participants first)."""
+    conn = db.get_db()
+    if conn.execute("SELECT 1 FROM lh_participants WHERE program = ? AND year = ?", (program, year)).fetchone():
+        conn.close()
+        return jsonify({"error": "У потоці є учасники — спершу приберіть їх"}), 400
+    conn.execute("DELETE FROM lh_streams WHERE program = ? AND year = ?", (program, year))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/lh-participants")
+def lh_participant_add():
+    """Add a person from the employee history to a stream; start region /
+    store / position are their current ones."""
+    data = request.get_json(silent=True) or {}
+    prog = "LH2" if str(data.get("program")) == "LH2" else "LH1"
+    try:
+        year = int(data.get("year"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Невірний потік"}), 400
+    tab = str(data.get("tab") or "").strip()
+    conn = db.get_db()
+    emp = _current_employee(conn, tab)
+    if not emp:
+        conn.close()
+        return jsonify({"error": "Співробітника не знайдено в історії"}), 404
+    if conn.execute("SELECT 1 FROM lh_participants WHERE program = ? AND year = ? AND tab = ?", (prog, year, tab)).fetchone():
+        conn.close()
+        return jsonify({"error": "Цей співробітник уже є в потоці"}), 400
+    region = conn.execute("SELECT region FROM store_regions WHERE store = ?", (emp["store"],)).fetchone()
+    conn.execute("INSERT OR IGNORE INTO lh_streams (program, year) VALUES (?, ?)", (prog, year))
+    conn.execute(
+        "INSERT INTO lh_participants (program, year, tab, name, region, store, position, status, passed1) "
+        "VALUES (?,?,?,?,?,?,?,?,0)",
+        (prog, year, tab, emp["name"], region["region"] if region else None, emp["store"],
+         reserve.position_info(emp["position"])[0], "Навчається"),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.patch("/api/lh-participants/<int:pid>")
+def lh_participant_update(pid):
+    data = request.get_json(silent=True) or {}
+    sets, params = [], []
+    if "status" in data:
+        if data["status"] not in reserve.PROGRAM_STATUSES:
+            return jsonify({"error": "Невідомий статус"}), 400
+        if data["status"] in reserve.LH2_ONLY_STATUSES:
+            c = db.get_db()
+            row = c.execute("SELECT program FROM lh_participants WHERE id = ?", (pid,)).fetchone()
+            c.close()
+            if row and row["program"] != "LH2":
+                return jsonify({"error": f"Статус «{data['status']}» — лише для Leader Hub 2.0"}), 400
+        sets.append("status = ?"); params.append(data["status"])
+    if "passed1" in data:
+        sets.append("passed1 = ?"); params.append(1 if data["passed1"] else 0)
+    if not sets:
+        return jsonify({"error": "Нічого змінювати"}), 400
+    conn = db.get_db()
+    conn.execute(f"UPDATE lh_participants SET {', '.join(sets)} WHERE id = ?", (*params, pid))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.delete("/api/lh-participants/<int:pid>")
+def lh_participant_delete(pid):
+    conn = db.get_db()
+    conn.execute("DELETE FROM lh_participants WHERE id = ?", (pid,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.put("/api/reserve-status")
+def reserve_status_set():
+    """Set (or clear — empty status) the reserve status of a person for a
+    programme by hand. A person outside the programmes (pid = tab number from
+    the employee history) can be marked "Потенційний"."""
+    data = request.get_json(silent=True) or {}
+    pid = str(data.get("pid") or "").strip()
+    # LH1 / LH2 — reserve toward the programme target; TZ — potential товарознавець
+    prog = str(data.get("program")) if str(data.get("program")) in ("LH1", "LH2", "TZ") else "LH1"
+    status = (data.get("status") or "").strip()
+    note = (data.get("note") or "").strip()[:500]
+    if not pid:
+        return jsonify({"error": "Не вказано працівника"}), 400
+    conn = db.get_db()
+    known = conn.execute("SELECT 1 FROM employee_history WHERE tab = ? LIMIT 1", (pid,)).fetchone() or (
+        pid.startswith("p") and pid[1:].isdigit()
+        and conn.execute("SELECT 1 FROM lh_participants WHERE id = ?", (int(pid[1:]),)).fetchone())
+    if not known:
+        conn.close()
+        return jsonify({"error": "Працівника не знайдено"}), 404
+    if not status:
+        conn.execute("DELETE FROM reserve_status WHERE pid = ? AND program = ?", (pid, prog))
+    elif status not in reserve.RESERVE_MANUAL_STATUSES:
+        conn.close()
+        return jsonify({"error": "Невідомий статус"}), 400
+    else:
+        conn.execute(
+            "INSERT INTO reserve_status (pid, program, status, note, updated_at) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(pid, program) DO UPDATE SET status = excluded.status, note = excluded.note, "
+            "updated_at = excluded.updated_at",
+            (pid, prog, status, note or None, datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"),
+        )
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/reserve")
+def reserve_view():
+    """Everything the "Кадровий резерв" tab needs (see reserve.lh_dataset and
+    static/js/reserve.js) — computed client-side from here on."""
+    conn = db.get_db()
+    # "as of" = when the employee history was exported/uploaded, not today:
+    # "works now" and the 12-month windows must match the data, or the
+    # numbers drift down as the file ages
+    up = conn.execute("SELECT uploaded_at FROM data_uploads WHERE kind = 'employee_history'").fetchone()
+    as_of = datetime.date.fromisoformat(up["uploaded_at"][:10]) if up else None
+    data = reserve.lh_dataset(conn, as_of)
+    data["streams"] = [dict(r) for r in conn.execute(
+        "SELECT program, year, date_start, date_end FROM lh_streams ORDER BY year DESC, program")]
+    data["uploads"] = {r["kind"]: {"rows": r["rows"], "uploadedAt": r["uploaded_at"]}
+                       for r in conn.execute("SELECT kind, rows, uploaded_at FROM data_uploads")}
+    data["statuses"] = reserve.PROGRAM_STATUSES
+    data["lh2OnlyStatuses"] = sorted(reserve.LH2_ONLY_STATUSES)
+    data["reserveStatuses"] = reserve.RESERVE_MANUAL_STATUSES
+    conn.close()
+    return jsonify(data)
 
 
 _KPI_PERIOD_RE = re.compile(r"\d{4}-(H[12]|Q[1-4])")
