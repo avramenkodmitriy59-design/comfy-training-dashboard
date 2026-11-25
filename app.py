@@ -5,6 +5,7 @@ import secrets
 import hmac
 import hashlib
 import datetime
+import time
 import threading
 
 from flask import Flask, request, session, jsonify, send_from_directory, g
@@ -66,7 +67,12 @@ app.config.update(
     SESSION_COOKIE_NAME="comfy_training_session",
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
+    # one working day from sign-in (not extended by activity): the password is
+    # asked daily, so access rules and the Feed auto-sync run on every new day
+    PERMANENT_SESSION_LIFETIME=datetime.timedelta(hours=12),
+    SESSION_REFRESH_EACH_REQUEST=False,
 )
+SESSION_HOURS = 12
 
 if URL_PREFIX:
     _inner_wsgi_app = app.wsgi_app
@@ -164,13 +170,20 @@ def is_access_owner():
 
 
 def is_authenticated():
-    return bool(session.get("authenticated"))
+    # a session from before the Feed login (no role in it) no longer counts:
+    # everyone signs in again — through Feed or the spare site password
+    # the 12 h are checked here too, not only by the cookie's expiry
+    try:
+        fresh = (time.time() - float(session.get("at") or 0)) < SESSION_HOURS * 3600
+    except (TypeError, ValueError):
+        fresh = False
+    return bool(session.get("authenticated")) and session.get("role") in ROLES and fresh
 
 
 def current_role():
     if not is_authenticated():
         return None
-    return session.get("role") or "admin"
+    return session.get("role")
 
 
 def current_user_label():
@@ -260,7 +273,7 @@ def login():
     if not feed_login:  # the old site password: admin only
         if hmac.compare_digest(password.encode("utf-8"), SECRETS["password"].encode("utf-8")):
             session.clear()
-            session.update(authenticated=True, role="admin", user=None)
+            session.update(authenticated=True, role="admin", user=None, at=time.time())
             session.permanent = True
             audit("Вхід", "Вхід", "Адмін · пароль сайту", who={})
             return jsonify({"ok": True, "role": "admin"})
@@ -292,10 +305,10 @@ def login():
     _log_login(conn, prof, role, label)
     conn.close()
     session.clear()
-    session.update(authenticated=True, role=role,
+    session.update(authenticated=True, role=role, at=time.time(),
                    user={k: prof.get(k) for k in ("login", "tab", "fio", "short", "position", "mag")})
     session.permanent = True
-    started = maybe_start_feed_auto(client, {k: prof.get(k) for k in ("login", "tab", "fio", "position", "mag", "reg")})
+    started = maybe_start_feed_auto(client, {**{k: prof.get(k) for k in ("login", "tab", "fio", "position", "mag", "reg")}, "role": role})
     return jsonify({"ok": True, "role": role, "feedAuto": started})
 
 
@@ -822,6 +835,18 @@ def _looks_partial(new_regions, new_rows, stored):
     return new_regions < regs or new_rows < n * 0.9
 
 
+FEED_ATT_NAMES = {"dir": "Директори", "tv": "Товарознавці", "klad": "Комірники", "kass": "Касири",
+                  "sm": "Сервіс-менеджери", "prod": "Продавці", "sellers": "Продавці"}
+
+
+def _report_name(x):
+    if x.get("streamType") == "overall":
+        return "Все навчання"
+    if x.get("streamType") == "trainees":
+        return "Стажери"
+    return f"Атестація: {FEED_ATT_NAMES.get(x.get('attType'), x.get('attType') or '')}"
+
+
 FEED_PARTIAL = "У Feed видно менше регіонів або людей, ніж уже є на дашборді — не перезаписано"
 
 
@@ -931,9 +956,15 @@ def maybe_start_feed_auto(client, who):
         pending = _prev_quarter_pending(conn)
     finally:
         conn.close()
-    if last and not pending:
-        age = datetime.datetime.utcnow() - datetime.datetime.fromisoformat(last.rstrip("Z"))
-        if age.total_seconds() < FEED_AUTO_HOURS * 3600:
+    if last:
+        last_dt = datetime.datetime.fromisoformat(last.rstrip("Z"))
+        # only the very first run of a new quarter skips the pause; a previous
+        # quarter still pending is retried with the next regular run (every
+        # FEED_AUTO_HOURS), not on every login
+        quarter_start = datetime.datetime.combine(
+            datetime.date(datetime.date.today().year, (datetime.date.today().month - 1) // 3 * 3 + 1, 1), datetime.time())
+        new_quarter = pending and last_dt < quarter_start
+        if not new_quarter and (datetime.datetime.utcnow() - last_dt).total_seconds() < FEED_AUTO_HOURS * 3600:
             return False
     if not _feed_auto_lock.acquire(blocking=False):
         return False
@@ -961,11 +992,15 @@ def _feed_auto_run(client, who):
                 res = run_feed_sync(client, y, q, period, FEED_AUTO_REPORTS, guard=True)
                 note = f"{res['label']}: збережено {len(res['saved'])}"
                 if res["skipped"]:
-                    note += f", пропущено {len(res['skipped'])}"
+                    # which report and why — so «пропущено» can be understood from the log
+                    why = "; ".join(f"{_report_name(x)} — {x['reason']}" for x in res["skipped"])
+                    note += f", пропущено {len(res['skipped'])} ({why})"
                 n += len(res["saved"])
-                # a regional login that only saw part of the network leaves
-                # the previous quarter pending for someone who sees it all
-                if period == "previous_quarter" and not any(x["reason"] == FEED_PARTIAL for x in res["skipped"]):
+                # the previous quarter is pulled once: an admin sees the whole
+                # network, so whatever they got is final; a regional login
+                # that only saw part of it leaves it for the next run
+                if period == "previous_quarter" and (who.get("role") == "admin"
+                                                     or not any(x["reason"] == FEED_PARTIAL for x in res["skipped"])):
                     prev_done = True
             except Exception as e:  # noqa: BLE001 — logged, never breaks the login
                 note = f"{q} квартал {y}: помилка — {str(e)[:200]}"

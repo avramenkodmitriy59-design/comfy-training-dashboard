@@ -742,15 +742,7 @@ async function watchFeedAuto(wasRunning = false) {
     feedAutoTimer = setTimeout(() => watchFeedAuto(true), 15000);
     return;
   }
-  if (st.lastAt) {
-    const d = new Date(st.lastAt);
-    const today = d.toDateString() === new Date().toDateString();
-    el.textContent = `Feed: ${today ? '' : d.toLocaleDateString('uk-UA', { day: '2-digit', month: '2-digit' }) + ' '}${d.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' })}`;
-    el.title = 'Коли дані востаннє оновлювались з Feed автоматично';
-    el.hidden = false;
-  } else {
-    el.hidden = true;
-  }
+  el.hidden = true; // the time of the last update is shown in «Востаннє оновлено» on each tab
   if (wasRunning) {
     await loadPositionsConfig();
     await loadStreams();
@@ -2221,7 +2213,9 @@ function fmtUploadedAt(iso) {
   if (!iso) return null;
   const d = new Date(iso);
   if (isNaN(d)) return null;
-  return d.toLocaleDateString('uk-UA', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  const date = d.toLocaleDateString('uk-UA', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  // a full timestamp also gets the time («Востаннє оновлено: 25.11.2026, 15:58»)
+  return String(iso).length > 10 ? `${date}, ${d.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' })}` : date;
 }
 
 function lastUpdatedFor(streamType, streamKey) {
