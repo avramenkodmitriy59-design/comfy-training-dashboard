@@ -12,10 +12,12 @@
   <div class="login-card">
     <img class="logo" src="static/assets/logo_green.png" alt="COMFY">
     <h1>Дашборд навчання</h1>
-    <p class="subtitle">Введіть пароль, щоб продовжити</p>
+    <p class="subtitle" id="login-subtitle">Увійдіть з логіном і паролем Feed</p>
     <div id="login-error" class="error-text"></div>
-    <input type="password" id="login-password" placeholder="Пароль" autocomplete="current-password">
+    <input type="text" id="login-user" placeholder="Логін Feed" autocomplete="username">
+    <input type="password" id="login-password" placeholder="Пароль Feed" autocomplete="current-password">
     <button class="btn btn-primary btn-block" id="login-submit">Увійти</button>
+    <button type="button" class="login-alt" id="login-mode">Вхід адміністратора за паролем сайту</button>
   </div>
 </div>
 
@@ -30,16 +32,22 @@
       </div>
     </div>
     <div class="top-actions">
-      <button class="btn btn-secondary btn-sm" id="btn-director-report">Звіт для РК</button>
-      <button class="btn btn-secondary btn-sm" id="btn-lesson-report">Звіт по заняттям</button>
-      <button class="btn btn-secondary btn-sm" id="btn-category-analysis">Аналіз категорій</button>
-      <button class="btn btn-secondary btn-sm" id="btn-classify">Класифікація посад</button>
-      <button class="btn btn-primary btn-sm" id="btn-feed-sync">Оновити з Feed</button>
-      <button class="btn btn-secondary btn-sm" id="btn-upload">Завантажити дані вручну</button>
+      <div class="top-tools">
+        <button class="btn btn-secondary btn-sm" id="btn-category-analysis">Аналіз категорій</button>
+        <button class="btn btn-secondary btn-sm" id="btn-classify">Класифікація посад</button>
+        <button class="btn btn-primary btn-sm" id="btn-feed-sync">Оновити з Feed</button>
+        <button class="btn btn-secondary btn-sm" id="btn-upload">Завантажити дані вручну</button>
+      </div>
+      <div class="top-user">
+      <button class="btn btn-secondary btn-sm" id="btn-access" hidden>👥 Доступ</button>
+      <span class="feed-auto-note" id="feed-auto-note" hidden></span>
+      <span class="user-label" id="user-label"></span>
       <button class="btn btn-secondary btn-sm" id="btn-logout">Вийти</button>
+      </div>
     </div>
   </div>
 
+  <div class="tabs-row">
   <div class="tabs">
     <button class="tab-btn active" data-tab="overall">Все навчання</button>
     <button class="tab-btn" data-tab="attestation">Атестація</button>
@@ -47,6 +55,8 @@
     <button class="tab-btn" data-tab="trainees">Стажери</button>
     <button class="tab-btn" data-tab="reserve">Кадровий резерв</button>
     <button class="tab-btn" data-tab="kpi">KPI</button>
+  </div>
+  <button class="btn btn-secondary btn-sm" id="btn-snapshot" title="Зберегти поточну вкладку як HTML-файл (знімок з вибраними фільтрами)">⬇️ Завантажити HTML</button>
   </div>
 
   <div id="position-switch" class="position-switch" hidden></div>
@@ -57,8 +67,6 @@
 
 </div>
 
-<div id="director-report-view" class="director-report-view" hidden></div>
-<div id="lesson-report-view" class="director-report-view" hidden></div>
 <div id="category-analysis-view" class="director-report-view" hidden></div>
 
 <div id="modal-root"></div>

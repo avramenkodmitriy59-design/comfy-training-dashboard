@@ -106,7 +106,8 @@ a { color: var(--color-green-dark); }
 .login-card h1 { font-size: 18px; margin-bottom: 4px; }
 .login-card p.subtitle { color: var(--color-muted); font-size: 13px; margin: 0 0 24px; }
 
-.login-card input[type="password"] {
+.login-card input[type="password"],
+.login-card input[type="text"] {
   width: 100%;
   padding: 12px 14px;
   border: 1px solid var(--color-border);
@@ -114,7 +115,7 @@ a { color: var(--color-green-dark); }
   margin-bottom: 12px;
   outline: none;
 }
-.login-card input[type="password"]:focus { border-color: var(--color-green); }
+.login-card input[type="password"]:focus, .login-card input[type="text"]:focus { border-color: var(--color-green); }
 
 .btn {
   display: inline-flex;
@@ -176,7 +177,10 @@ a { color: var(--color-green-dark); }
 
 /* Same buttons on every tab; a label never wraps inside its button — the
    row wraps whole buttons instead when it runs out of width. */
-.top-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+/* admin tools on the left, «👥 Доступ» / name / «Вийти» pinned to the right */
+.top-actions { display: flex; gap: 10px 24px; align-items: center; flex-wrap: wrap; justify-content: space-between; flex: 1 1 auto; }
+.top-tools, .top-user { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.top-user { margin-left: auto; }
 .top-actions .btn { white-space: nowrap; }
 .top-actions .btn-primary { border: 1px solid transparent; } /* same height as the bordered secondary buttons */
 
@@ -242,6 +246,18 @@ a { color: var(--color-green-dark); }
   min-width: 150px;
 }
 .filter-reset { margin-left: auto; align-self: center; }
+/* main tabs' filter bar: one line, equal fields (Тема twice as wide), the same
+   on every tab whatever the options' length; wraps only on narrow screens */
+#filters-bar { flex-wrap: nowrap; gap: 12px; }
+#filters-bar .filter-field { flex: 1 1 0; min-width: 0; }
+#filters-bar .filter-field select { min-width: 0; width: 100%; box-sizing: border-box; text-overflow: ellipsis; }
+#filters-bar .filter-wide { flex-grow: 2; }
+#filters-bar .filter-reset { flex: 0 0 auto; align-self: flex-end; margin: 0; }
+@media (max-width: 1100px) {
+  #filters-bar { flex-wrap: wrap; }
+  #filters-bar .filter-field { flex: 1 1 200px; }
+}
+
 .filter-note { color: var(--color-muted); font-size: 13px; align-self: center; line-height: 1.4; }
 .last-updated-note { text-align: right; color: var(--color-muted); font-size: 12px; margin-bottom: 6px; }
 
@@ -590,12 +606,12 @@ table.data-table tr.row-clickable:hover td { background: #f0f2f5; }
 .lh-root .hb-tot { font-size: 12px; color: var(--color-graphite); font-variant-numeric: tabular-nums; }
 .lh-root .donuts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
 .lh-root .donut-col { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-.lh-root .donut { width: 100%; max-width: 210px; }
+.lh-root .donut { width: 100%; max-width: 260px; }
 .lh-root .donut path { cursor: help; } .lh-root .donut path:hover { opacity: .88; }
 .lh-root .dn-lbl { font-size: 11px; font-weight: 700; pointer-events: none; }
 .lh-root .dn-c { font-family: var(--font-heading); font-size: 20px; fill: var(--color-graphite-dark); }
 .lh-root .dn-s { font-size: 10px; fill: var(--color-muted); }
-.lh-root .donut-wrap { display: grid; grid-template-columns: minmax(0, 240px) minmax(0, 1fr); gap: 18px; align-items: center; }
+.lh-root .donut-wrap { display: grid; grid-template-columns: minmax(0, 280px) minmax(0, 1fr); gap: 18px; align-items: center; }
 @media (max-width: 520px) { .lh-root .donut-wrap { grid-template-columns: minmax(0, 1fr); } }
 .lh-root .yr-chip { font-family: var(--font-heading); font-size: 15px; background: #fee4d6; color: var(--color-graphite-dark); padding: 3px 14px; border-radius: 999px; }
 .lh-root .center { text-align: center; }
@@ -639,9 +655,133 @@ table.data-table tr.row-clickable:hover td { background: #f0f2f5; }
 .lh-root .st-auto { display: inline-flex; align-items: center; gap: 6px; } .lh-root .st-auto-mark { cursor: help; font-size: 13px; }
 .data-table tr.ls-active td { background: var(--color-bg); }
 /* LH 1.0 / 2.0 filter bar: equal-width fields */
-.lh-root #lh-filters { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)) auto; gap: 10px; align-items: end; }
+.lh-root #lh-filters { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.8fr) minmax(0, 1fr) auto; gap: 10px; align-items: end; }
+/* the participants table's own filters, inside its card */
+.lh-root .lh-part-filters { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr); gap: 10px; padding: 0; margin: 0 0 10px; background: none; box-shadow: none; }
+.lh-root .lh-part-filters .filter-field { min-width: 0; }
+.lh-root .lh-part-filters .filter-field select, .lh-root .lh-part-filters .filter-field input { min-width: 0; width: 100%; box-sizing: border-box; }
 .lh-root #lh-filters > [hidden] { display: none; }
 .lh-root #lh-filters .filter-field { min-width: 0; }
 .lh-root #lh-filters .filter-field select, .lh-root #lh-filters .filter-field input { min-width: 0; width: 100%; box-sizing: border-box; }
 @media (max-width: 1100px) { .lh-root #lh-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 600px) { .lh-root #lh-filters { grid-template-columns: minmax(0, 1fr); } }
+
+/* Кадровий резерв: one column per post (need on top, available below) */
+.lh-root .kpi-grid.kpi-cols { align-items: stretch; }
+.lh-root .kpi-col { display: grid; grid-template-rows: 1fr 1fr; gap: 12px; min-width: 0; }
+@media (max-width: 960px) { .lh-root .kpi-grid.kpi-cols { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .lh-root .kpi-grid.kpi-cols { grid-template-columns: minmax(0, 1fr); } }
+
+/* Потенційні: more than a year without a decision */
+.data-table tr.row-stale td { background: rgba(255, 196, 0, 0.18); }
+.stale-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+.stale-mark { width: 12px; height: 12px; border-radius: 3px; background: rgba(255, 196, 0, 0.55); }
+.btn-pair { display: inline-flex; gap: 6px; white-space: nowrap; }
+
+/* «Доступно на …»: reserve | potentials in one tile */
+.lh-root .kpi-split { display: flex; flex-direction: column; }
+.lh-root .kpi-split-title { font-size: 14px; color: var(--color-muted); margin-bottom: 6px; }
+.lh-root .kpi-halves { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+.lh-root .kpi-half { all: unset; cursor: pointer; padding: 2px 10px 2px 0; border-radius: 8px; min-width: 0; }
+.lh-root .kpi-half + .kpi-half { padding-left: 12px; border-left: 1px solid var(--color-border); }
+.lh-root .kpi-half:hover .kpi-label, .lh-root .kpi-half:focus-visible .kpi-label { color: var(--color-text); text-decoration: underline; }
+.lh-root .kpi-half:focus-visible { outline: 2px solid var(--color-primary, #4caf50); outline-offset: 2px; }
+.lh-root .kpi-half .kpi-label { margin-top: 2px; }
+
+/* «Додати потенційного»: store picker + search in one row */
+.pp-find { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+.pp-find select { min-width: 0; }
+@media (max-width: 600px) { .pp-find { grid-template-columns: minmax(0, 1fr); } }
+.pp-added { color: var(--color-muted); font-size: 13px; margin-right: 6px; }
+/* «Додати в потенційні»: comment window over the list */
+.pp-ask-backdrop { position: fixed; inset: 0; z-index: 1100; background: rgba(0, 0, 0, 0.35); display: flex; align-items: center; justify-content: center; padding: 16px; }
+.pp-ask { background: var(--color-card); border-radius: 16px; padding: 22px 24px; width: 100%; max-width: 440px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.2); }
+.pp-ask h3 { margin: 0 0 4px; }
+.pp-ask .modal-actions { gap: 8px; }
+
+/* pivot tables (potentials by region / store): number columns centred, same width */
+.lh-root table.data-table.pivot th.num, .lh-root table.data-table.pivot td.num { text-align: center; width: 15%; }
+.lh-root .num-tip.num-empty { background: transparent; color: var(--color-muted); font-weight: 400; cursor: default; }
+
+/* tab bar + «Завантажити HTML» on the right */
+.tabs-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.tabs-row .tabs { margin-bottom: 0; }
+.tabs-row #btn-snapshot { margin-left: auto; }
+
+/* login: Feed login + the spare admin password */
+.login-alt { all: unset; display: block; margin: 14px auto 0; font-size: 13px; color: var(--color-muted); cursor: pointer; text-decoration: underline; }
+.login-alt:focus-visible { outline: 2px solid var(--color-muted); outline-offset: 2px; border-radius: 4px; }
+.user-label { font-size: 13px; color: var(--color-muted); white-space: nowrap; }
+.feed-auto-note { font-size: 12px; color: var(--color-muted); white-space: nowrap; }
+.feed-auto-note.running::before { content: ''; display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px;
+  border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; }
+
+/* «Донори»: regions and stores side by side, top 3 marked */
+.lh-root .donors-grid { margin-top: 14px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); margin-bottom: 0; }
+.lh-root table.data-table.donors th { white-space: normal; vertical-align: bottom; line-height: 1.25; }
+.lh-root table.data-table.donors th.num { min-width: 64px; }
+/* stores: as tall as the regions table next to it, the rest scrolls */
+.lh-root .donor-right { position: relative; min-height: 260px; }
+.lh-root .donor-fill { position: absolute; inset: 0; display: flex; flex-direction: column; }
+.lh-root .donor-fill > div:last-child { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.lh-root .donor-fill .table-scroll { flex: 1; min-height: 0; overflow: auto; }
+.lh-root .donor-fill thead th { position: sticky; top: 0; background: var(--color-card, #fff); z-index: 1; }
+@media (max-width: 860px) {
+  .lh-root .donors-grid { grid-template-columns: minmax(0, 1fr); }
+  .lh-root .donor-right { min-height: 0; }
+  .lh-root .donor-fill { position: static; }
+  .lh-root .donor-fill .table-scroll { max-height: 420px; }
+}
+.lh-root .donor-sub { margin: 0 0 2px; font-size: 15px; }
+.lh-root .data-table tr.row-top td { background: #eef9ec; }
+.lh-root .donor-top { color: #1b7a0c; font-weight: 600; }
+.lh-root table.data-table.donors th.num, .lh-root table.data-table.donors td.num { text-align: center; }
+
+/* «Доступний кадровий резерв» (status table) */
+.lh-root .rs-hint p { margin: 0 0 4px; color: var(--color-muted); font-size: 13px; }
+.lh-root .rs-hint { margin-bottom: 12px; }
+.lh-root .rs-tools { flex-wrap: wrap; gap: 10px; }
+.lh-root .rs-comment { cursor: text; }
+.lh-root .rs-comment.empty { color: var(--color-muted); }
+.lh-root .rs-comment:hover { text-decoration: underline dotted; }
+
+/* «Успішність по регіонах»: the whole programme in a green box on top */
+.lh-root .pb-overall { border: 2px solid var(--color-green); background: #f1fbef; border-radius: 12px; padding: 12px 16px; margin: 4px 0 14px; display: flex; flex-direction: column; gap: 8px; }
+.lh-root .pb-overall-title { font-family: var(--font-heading); font-weight: 700; color: #1b7a0c; }
+.lh-root .pb-overall .hb-label { font-weight: 600; }
+.lh-root .pb-bar.big { height: 16px; border-radius: 8px; }
+.lh-root .pb-bar.big span { top: 0; font-weight: 600; }
+
+.lh-root .part-tools { flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+
+/* one format for every filter on the site (as «Рік (потік)»): rounded field,
+   small uppercase label above (.filter-field) */
+select:not(.st-sel):not(.lh-status), .search-input,
+input[type="text"]:not(.rs-note), input[type="search"], input[type="number"], input[type="date"] {
+  padding: 8px 10px; border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  background: #fff; color: var(--color-text); line-height: 1.3; box-sizing: border-box;
+}
+select:not(.st-sel):not(.lh-status):focus, .search-input:focus, input[type="text"]:not(.rs-note):focus, input[type="search"]:focus { outline: none; border-color: var(--color-green); }
+.filter-field .search-input { min-width: 0; width: 100%; }
+/* a row of labelled filters inside a card */
+.filters-inline { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin: 8px 0 10px; }
+.filters-inline .filter-field { flex: 1 1 150px; min-width: 0; }
+.filters-inline .filter-field.wide { flex: 2 1 220px; }
+.filters-inline .filter-field select, .filters-inline .filter-field input { min-width: 0; width: 100%; }
+.pp-find { align-items: end; }
+.pp-find .filter-field { min-width: 0; }
+.pp-find .filter-field select, .pp-find .filter-field input { width: 100%; min-width: 0; }
+.filters-inline > .stale-toggle, .filters-inline > .btn { flex: 0 0 auto; margin-bottom: 6px; }
+
+/* «Потенційні по регіонах»: regions with their stores opened in place */
+.lh-root table.pot-tree th:first-child, .lh-root table.pot-tree td:first-child { width: 40%; }
+.lh-root table.pot-tree th.num, .lh-root table.pot-tree td.num { width: 20%; }
+.lh-root .pot-tree .pt-caret { display: inline-block; width: 12px; color: var(--color-muted); font-size: 11px; }
+.lh-root .pot-tree tr.pt-store td { background: var(--color-bg, #f5f6f8); }
+.lh-root .pot-tree tr.pt-store td:first-child { padding-left: 30px; }
+.lh-root .pot-tree tfoot td { font-weight: 700; }
+
+/* region next to the LH tabs: label on the left, field as tall as «⚙️ Налаштування» */
+.lh-side #ff-reg-side { flex-direction: row; align-items: center; gap: 8px; min-width: 0; }
+.lh-side #ff-reg-side label { margin: 0; }
+.lh-side #ff-reg-side select { padding: 7px 10px; font-size: 13px; min-width: 200px; }

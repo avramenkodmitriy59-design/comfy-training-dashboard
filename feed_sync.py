@@ -128,6 +128,27 @@ class FeedClient:
         self._request(self.base_url)
 
 
+    def profile(self):
+        """The logged-in person as Feed's own frontend sees them right after
+        login (feed/settings/getSettings -> userInfo). Only the fields the
+        dashboard keeps: who, position, department."""
+        data = self.post("feed/settings/getSettings", {"url": self.base_url + "feed/"})
+        try:
+            info = json.loads(base64.b64decode(data)).get("userInfo") or {}
+        except (ValueError, TypeError, AttributeError) as e:
+            raise FeedError("Feed повернув неочікувану відповідь про користувача") from e
+        return {
+            "login": str(info.get("login") or ""),
+            "tab": str(info.get("tabNo") or ""),
+            "fio": str(info.get("fioFull") or info.get("fio") or ""),
+            "short": str(info.get("fio") or ""),
+            "position": str(info.get("position") or ""),
+            "mag": str(info.get("mag") or info.get("magFull") or ""),
+            "reg": str(info.get("reg") or ""),
+            "blocked": bool(info.get("blocked")),
+        }
+
+
 # Same filter the "Звіт по заняттях" page sends: all regions/stores/
 # positions, every training of the period selected. `period` is one of
 # Feed's fixed relative ranges (see relative_quarter_period) — Feed has no

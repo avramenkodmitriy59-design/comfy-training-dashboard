@@ -359,52 +359,6 @@ def clean_aep_row(raw):
     }
 
 
-def clean_director_report_row(raw):
-    """"Звіт для РК" — one row per topic per director per quarter, from
-    the "Деталізація" sheet. year/quarter are already resolved client-side
-    (from the row's `begin` date, same as AEP) by the time this runs —
-    this just coerces/trims the rest."""
-    def num(v):
-        try:
-            n = float(v)
-        except (TypeError, ValueError):
-            return 0.0
-        return n if n == n else 0.0
-
-    return {
-        "topic": str(raw.get("topic") or "").strip(),
-        "trainingType": str(raw.get("trainingType") or "").strip(),
-        "region": str(raw.get("region") or "").strip(),
-        "store": str(raw.get("store") or "").strip(),
-        "position": str(raw.get("position") or "").strip(),
-        "name": str(raw.get("name") or "").strip(),
-        "score": num(raw.get("score")),
-    }
-
-
-def clean_lesson_report_row(raw):
-    """"Звіт по заняттям" — one row per person for ONE specific training
-    session ("Звіт по заняттю #N: ..."). material/test are already parsed
-    to 0-100 floats client-side (percent strings with comma decimals)."""
-    def num(v):
-        try:
-            n = float(v)
-        except (TypeError, ValueError):
-            return 0.0
-        return n if n == n else 0.0
-
-    return {
-        "region": str(raw.get("region") or "").strip(),
-        "store": str(raw.get("store") or "").strip(),
-        "position": str(raw.get("position") or "").strip(),
-        "tabNumber": str(raw.get("tabNumber") or "").strip(),
-        "name": str(raw.get("name") or "").strip(),
-        "material": num(raw.get("material")),
-        "test": num(raw.get("test")),
-        "testDate": str(raw.get("testDate") or "").strip(),
-    }
-
-
 def _new_aep_bucket(extra=None):
     b = {"assigned": 0, "completed": 0, "count": 0, "progressSum": 0.0, "scoreSum": 0.0, "scoreCount": 0}
     if extra:

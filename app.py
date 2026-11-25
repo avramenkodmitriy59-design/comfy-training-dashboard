@@ -3,9 +3,11 @@ import json
 import re
 import secrets
 import hmac
+import hashlib
 import datetime
+import threading
 
-from flask import Flask, request, session, jsonify, send_from_directory
+from flask import Flask, request, session, jsonify, send_from_directory, g
 from werkzeug.utils import redirect
 
 import db
@@ -22,8 +24,7 @@ from aggregate import (
     aggregate_project, clean_project_row, distribution_project,
     clean_aep_row, aep_goal_for_quarter, aggregate_aep, distribution_aep,
     normalize_person_name, normalize_roster_tier, build_roster_matcher, find_near_duplicate_names,
-    suggest_name_matches, find_roster_duplicate_rows, clean_director_report_row,
-    clean_lesson_report_row, clean_category_report_row,
+    suggest_name_matches, find_roster_duplicate_rows, clean_category_report_row,
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -130,9 +131,57 @@ backfill_distribution()
 
 
 # ---------- auth ----------
+# Two ways in: the Feed login (everyone; the role comes from the access rules
+# matched against the Feed profile — department, position) and the old site
+# password (admin only, a spare way in when Feed is down). Sessions from
+# before the roles existed count as admin.
+
+ROLES = ("admin", "hr")
+# HR: the reports of «Все навчання», «Атестація», «Стажери», «Кадровий резерв»
+# (read) + work with potentials (PUT /api/reserve-status, checked inside)
+HR_GET = {
+    "/api/session", "/api/config", "/api/streams", "/api/periods", "/api/latest", "/api/summary",
+    "/api/topics", "/api/details", "/api/trainees", "/api/reserve", "/api/employees/search",
+    "/api/feed-auto",
+}
+HR_WRITE = {("PUT", "/api/reserve-status"), ("PUT", "/api/reserve-note"), ("POST", "/api/logout")}
+FAILED_LOGINS = {}  # login -> [timestamps] (simple brute-force brake)
+LOGIN_TRIES, LOGIN_WINDOW = 8, 15 * 60
+
+
+# who may set up access («👥 Доступ»): only these Feed logins, never the shared
+# site password. Kept as sha256 of the lower-case login so the repo holds no
+# names; ACCESS_OWNERS (comma-separated logins) adds more without a release.
+ACCESS_OWNER_HASHES = {"13d06fdf10c7d033a2a36369801d6f0b5c0219a666c58f74f1fc6c7bdd1654a3"}
+
+
+def is_access_owner():
+    login = str((session.get("user") or {}).get("login") or "").strip().lower()
+    if not login or current_role() != "admin":
+        return False
+    extra = {x.strip().lower() for x in os.environ.get("ACCESS_OWNERS", "").split(",") if x.strip()}
+    return login in extra or hashlib.sha256(login.encode("utf-8")).hexdigest() in ACCESS_OWNER_HASHES
+
 
 def is_authenticated():
     return bool(session.get("authenticated"))
+
+
+def current_role():
+    if not is_authenticated():
+        return None
+    return session.get("role") or "admin"
+
+
+def current_user_label():
+    u = session.get("user") or {}
+    return u.get("short") or u.get("fio") or ("адмін (пароль)" if current_role() == "admin" else "")
+
+
+def hr_allowed(method, path):
+    if method == "GET":
+        return path in HR_GET
+    return (method, path) in HR_WRITE
 
 
 @app.before_request
@@ -142,30 +191,348 @@ def require_auth():
         return None
     if path.startswith("/static/") or path == "/" or path == "/favicon.ico":
         return None
-    if path.startswith("/api/") and not is_authenticated():
-        return jsonify({"error": "unauthorized"}), 401
+    if path.startswith("/api/"):
+        role = current_role()
+        if not role:
+            return jsonify({"error": "unauthorized"}), 401
+        if role == "hr" and not hr_allowed(request.method, path):
+            return jsonify({"error": "Немає доступу"}), 403
+        if path.startswith("/api/access") and not is_access_owner():
+            return jsonify({"error": "Налаштовувати доступ може лише власник дашборда"}), 403
+        if path.startswith("/api/kpi") and not is_access_owner():  # KPI: owner only for now
+            return jsonify({"error": "Немає доступу"}), 403
+    return None
+
+
+# fixed order, no priorities to set: a personal «Без доступу» beats any role,
+# then the highest role wins (Адмін before Регіональна команда)
+ROLE_ORDER = "CASE role WHEN 'none' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END"
+
+
+def _access_for(conn, prof):
+    """The strongest access rule the Feed profile matches -> (role, label)."""
+    for r in conn.execute(f"SELECT * FROM access_rules ORDER BY {ROLE_ORDER}, id"):
+        have = str(prof.get(r["field"]) or "").strip().lower()
+        want = str(r["value"] or "").strip().lower()
+        if want and (have == want if r["op"] == "equals" else want in have):
+            return r["role"], r["label"] or r["value"]
+    return None, None
+
+
+def _now():
+    return datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+def audit(section, action, details=None, who=None, conn=None):
+    """One line in «Журнал». who — a Feed profile / session user; by default
+    whoever is logged in (the site-password login has no name)."""
+    u = who if who is not None else (session.get("user") or {})
+    fio = u.get("fio") or (None if u.get("login") else "Адмін (пароль сайту)")
+    own = conn is None
+    conn = conn or db.get_db()
+    try:
+        conn.execute(
+            "INSERT INTO audit_log (at, login, tab, fio, position, mag, reg, section, action, details) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (_now(), u.get("login"), u.get("tab"), fio, u.get("position"), u.get("mag"), u.get("reg"),
+             section, action, (str(details)[:1000] if details else None)))
+        conn.commit()
+    finally:
+        if own:
+            conn.close()
+
+
+def _log_login(conn, prof, role, result):
+    if role:
+        audit("Вхід", "Вхід", f"{ACCESS_ROLE_NAMES.get(role, role)} · {result or ''}", who=prof, conn=conn)
+    else:
+        audit("Вхід", "Немає доступу", result, who=prof, conn=conn)
+
+
+ACCESS_ROLE_NAMES = {"admin": "Адмін", "hr": "Регіональна команда", "none": "Без доступу"}
 
 
 @app.post("/api/login")
 def login():
     data = request.get_json(silent=True) or {}
     password = str(data.get("password", ""))
-    if hmac.compare_digest(password.encode("utf-8"), SECRETS["password"].encode("utf-8")):
-        session["authenticated"] = True
-        session.permanent = True
-        return jsonify({"ok": True})
-    return jsonify({"ok": False, "error": "Невірний пароль"}), 401
+    feed_login = str(data.get("login") or "").strip()
+    if not feed_login:  # the old site password: admin only
+        if hmac.compare_digest(password.encode("utf-8"), SECRETS["password"].encode("utf-8")):
+            session.clear()
+            session.update(authenticated=True, role="admin", user=None)
+            session.permanent = True
+            audit("Вхід", "Вхід", "Адмін · пароль сайту", who={})
+            return jsonify({"ok": True, "role": "admin"})
+        audit("Вхід", "Невдала спроба", "пароль сайту", who={})
+        return jsonify({"ok": False, "error": "Невірний пароль"}), 401
+
+    now = datetime.datetime.utcnow().timestamp()
+    key = feed_login.lower()
+    tries = [t for t in FAILED_LOGINS.get(key, []) if now - t < LOGIN_WINDOW]
+    if len(tries) >= LOGIN_TRIES:
+        return jsonify({"ok": False, "error": "Забагато невдалих спроб. Спробуйте за 15 хвилин"}), 429
+    try:
+        client = FeedClient()
+        client.login(feed_login, password)  # the password goes to Feed only, never stored
+        prof = client.profile()
+    except FeedError as e:
+        FAILED_LOGINS[key] = tries + [now]
+        audit("Вхід", "Невдала спроба", str(e)[:200], who={"login": feed_login, "fio": feed_login})
+        return jsonify({"ok": False, "error": str(e)}), 401
+    FAILED_LOGINS.pop(key, None)
+    conn = db.get_db()
+    role, label = _access_for(conn, prof)
+    if prof.get("blocked"):
+        role = None
+    if role not in ROLES:
+        _log_login(conn, prof, None, "немає доступу")
+        conn.close()
+        return jsonify({"ok": False, "error": "Немає доступу до дашборда. Зверніться до Відділу навчання роздрібу"}), 403
+    _log_login(conn, prof, role, label)
+    conn.close()
+    session.clear()
+    session.update(authenticated=True, role=role,
+                   user={k: prof.get(k) for k in ("login", "tab", "fio", "short", "position", "mag")})
+    session.permanent = True
+    started = maybe_start_feed_auto(client, {k: prof.get(k) for k in ("login", "tab", "fio", "position", "mag", "reg")})
+    return jsonify({"ok": True, "role": role, "feedAuto": started})
 
 
 @app.post("/api/logout")
 def logout():
+    if session.get("authenticated"):
+        audit("Вхід", "Вихід")
     session.clear()
     return jsonify({"ok": True})
 
 
 @app.get("/api/session")
 def session_status():
-    return jsonify({"authenticated": is_authenticated()})
+    return jsonify({"authenticated": is_authenticated(), "role": current_role(), "user": session.get("user"),
+                    "accessOwner": is_access_owner()})
+
+
+# access rules and the login log («Доступ», admin only — HR never reaches here)
+ACCESS_FIELDS = ("mag", "reg", "position", "tab", "login")
+
+
+@app.get("/api/access")
+def access_get():
+    conn = db.get_db()
+    rules = [dict(r) for r in conn.execute(f"SELECT * FROM access_rules ORDER BY {ROLE_ORDER}, id")]
+    conn.close()
+    return jsonify({"rules": rules})
+
+
+@app.get("/api/access-audit")
+def access_audit():
+    """«Журнал»: the last 500 entries for the filters (person, section, days)
+    plus everyone who appears in the log, for the person filter."""
+    who, section = request.args.get("who") or "", request.args.get("section") or ""
+    days = request.args.get("days", type=int)
+    where, params = [], []
+    if who:
+        where.append("COALESCE(login, fio) = ?"); params.append(who)
+    if section:
+        where.append("section = ?"); params.append(section)
+    if days:
+        since = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+        where.append("at >= ?"); params.append(since.isoformat(timespec="seconds") + "Z")
+    conn = db.get_db()
+    rows = [dict(r) for r in conn.execute(
+        f"SELECT * FROM audit_log {'WHERE ' + ' AND '.join(where) if where else ''} ORDER BY id DESC LIMIT 500", params)]
+    people = [dict(r) for r in conn.execute(
+        "SELECT COALESCE(login, fio) AS key, MAX(fio) AS fio, MAX(position) AS position, COUNT(*) AS n "
+        "FROM audit_log GROUP BY COALESCE(login, fio) ORDER BY MAX(fio)")]
+    sections = [r[0] for r in conn.execute("SELECT DISTINCT section FROM audit_log ORDER BY section")]
+    conn.close()
+    return jsonify({"rows": rows, "people": people, "sections": sections})
+
+
+@app.post("/api/access-rules")
+def access_rule_save():
+    d = request.get_json(silent=True) or {}
+    role, field, op = d.get("role"), d.get("field"), d.get("op") or "contains"
+    value = str(d.get("value") or "").strip()
+    if role not in ROLES + ("none",) or field not in ACCESS_FIELDS or op not in ("contains", "equals") or not value:
+        return jsonify({"error": "Заповніть роль, поле й значення"}), 400
+    conn = db.get_db()
+    args = (role, field, op, value, str(d.get("label") or "").strip() or None)
+    if d.get("id"):
+        conn.execute("UPDATE access_rules SET role=?, field=?, op=?, value=?, label=? WHERE id=?", args + (int(d["id"]),))
+    else:
+        conn.execute("INSERT INTO access_rules (role, field, op, value, label) VALUES (?,?,?,?,?)", args)
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.delete("/api/access-rules/<int:rule_id>")
+def access_rule_delete(rule_id):
+    conn = db.get_db()
+    conn.execute("DELETE FROM access_rules WHERE id = ?", (rule_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+# ---------- «Журнал»: what each change on the dashboard did ----------
+# One describer per write endpoint: (section, action, details) from the
+# request (and the response / what was there before). Only successful
+# requests are logged; login, logout and Feed auto-sync log themselves.
+
+RESERVE_FOR = {"LH1": "на Заступника", "LH2": "на Директора", "TZ": "на Товарознавця"}
+PROG_NAME = {"LH1": "LH 1.0", "LH2": "LH 2.0", "TZ": "LH БЕК"}
+
+
+def _person(conn, pid):
+    pid = str(pid or "")
+    if pid.startswith("p") and pid[1:].isdigit():
+        r = conn.execute("SELECT name, store FROM lh_participants WHERE id = ?", (int(pid[1:]),)).fetchone()
+    else:
+        r = conn.execute("SELECT name, store FROM employee_history WHERE tab = ? ORDER BY date_start DESC LIMIT 1",
+                         (pid,)).fetchone()
+    return f"{r['name']}{', ' + r['store'] if r['store'] else ''}" if r else pid
+
+
+def _audit_before():
+    """What is there before a change — for «з якого на який»."""
+    ep, d, va = request.endpoint, request.get_json(silent=True) or {}, request.view_args or {}
+    conn = db.get_db()
+    try:
+        if ep == "reserve_status_set":
+            prog = str(d.get("program")) if str(d.get("program")) in RESERVE_FOR else "LH1"
+            old = conn.execute("SELECT status, note FROM reserve_status WHERE pid = ? AND program = ?",
+                               (str(d.get("pid") or ""), prog)).fetchone()
+            return {"who": _person(conn, d.get("pid")), "old": old["status"] if old else "",
+                    "oldNote": (old["note"] or "") if old else ""}
+        if ep == "admin_note_set":
+            prog = reserve.program_code(d.get("program"))
+            old = conn.execute("SELECT note FROM admin_notes WHERE key = ?",
+                               (f"{d.get('pid')}|{prog}|{d.get('year')}",)).fetchone()
+            return {"who": _person(conn, d.get("pid")), "old": old["note"] if old else ""}
+        if ep == "reserve_note_set":
+            prog = reserve.program_code(d.get("program"))
+            old = conn.execute("SELECT note FROM reserve_notes WHERE pid = ? AND program = ?",
+                               (str(d.get("pid") or ""), prog)).fetchone()
+            return {"who": _person(conn, d.get("pid")), "old": old["note"] if old else ""}
+        if ep in ("lh_participant_update", "lh_participant_delete"):
+            r = conn.execute("SELECT * FROM lh_participants WHERE id = ?", (va.get("pid"),)).fetchone()
+            return dict(r) if r else {}
+        if ep == "access_rule_delete":
+            r = conn.execute("SELECT * FROM access_rules WHERE id = ?", (va.get("rule_id"),)).fetchone()
+            return dict(r) if r else {}
+    finally:
+        conn.close()
+    return {}
+
+
+def _audit_reserve(d, b, resp):
+    prog = str(d.get("program")) if str(d.get("program")) in RESERVE_FOR else "LH1"
+    new, old = (d.get("status") or "").strip(), b.get("old") or ""
+    note = (d.get("note") or "").strip()
+    if new == "Потенційний" and old != "Потенційний":
+        action = "Додав у потенційні"
+    elif new == old == "Потенційний":
+        action = "Змінив коментар" if note != b.get("oldNote") else "✓ Залишив у потенційних"
+    elif not new:
+        action = "Прибрав з потенційних" if old == "Потенційний" else "Скинув ручний статус"
+    elif new == "Не в резерві":
+        action = "✕ Прибрав з потенційних"
+    else:
+        action = "Змінив статус"
+    det = f"{b.get('who')} · {RESERVE_FOR[prog]}"
+    if action in ("Змінив статус", "Скинув ручний статус"):
+        det += f" · {old or 'авто'} → {new or 'авто'}"
+    if note and note != b.get("oldNote"):
+        det += f" · «{note}»"
+    return "Кадровий резерв", action, det
+
+
+def _audit_lh_update(d, b, resp):
+    who = f"{b.get('name', '')} · {PROG_NAME.get(b.get('program'), b.get('program'))} {b.get('year', '')}"
+    if "status" in d:
+        return "Налаштування LH", "Змінив статус учасника", f"{who} · {b.get('status') or '—'} → {d['status']}"
+    return "Налаштування LH", "Змінив модуль 1", f"{who} · {'пройшов' if d.get('passed1') else 'не пройшов'}"
+
+
+def _upload_name(d):
+    t = d.get("streamType")
+    return {"overall": "Все навчання", "attestation": "Атестація", "project": f"Проєкт «{d.get('projectName', '')}»"}.get(t, t)
+
+
+AUDIT = {
+    "feed_sync": lambda d, b, r: ("Feed", "Оновив з Feed вручну",
+        f"{r.get('label')}: збережено {len(r.get('saved') or [])}"
+        + (f", пропущено {len(r.get('skipped'))}" if r.get("skipped") else "")),
+    "upload": lambda d, b, r: ("Завантаження", "Завантажив звіт",
+        f"{_upload_name(d)}{' · ' + r.get('streamKey') if d.get('streamType') == 'attestation' else ''} · {d.get('label', '')} · {r.get('rowsCount', 0)} рядків"),
+    "upload_employee_history": lambda d, b, r: ("Завантаження", "Завантажив «Історію працівника»", f"{r.get('total', '')} рядків")
+        if int(d.get("part") or 0) >= int(d.get("parts") or 1) - 1 else None,
+    "upload_lh_participants": lambda d, b, r: ("Завантаження", "Завантажив учасників Leader Hub",
+        f"{r.get('participants')} учасників, {r.get('stores')} магазинів"),
+    "upload_aep": lambda d, b, r: ("Завантаження", "Завантажив звіт AEP", None),
+    "upload_aep_roster": lambda d, b, r: ("Завантаження", "Завантажив ростер AEP", None),
+    "upload_category_report": lambda d, b, r: ("Завантаження", "Завантажив звіт категорій",
+        f"{d.get('position', '')} · {d.get('periodLabel', '')} · {r.get('rowsCount', 0)} рядків"),
+    "reserve_status_set": _audit_reserve,
+    "admin_note_set": lambda d, b, r: ("Налаштування LH",
+        "Видалив адмін-коментар" if not (d.get("note") or "").strip() else "Змінив адмін-коментар" if b.get("old") else "Додав адмін-коментар",
+        f"{b.get('who')} · {PROG_NAME.get(reserve.program_code(d.get('program')), '')} {d.get('year', '')}"
+        + (f" · «{(d.get('note') or '').strip()}»" if (d.get("note") or "").strip() else "")),
+    "reserve_note_set": lambda d, b, r: ("Кадровий резерв",
+        "Видалив коментар" if not (d.get("note") or "").strip() else "Змінив коментар" if b.get("old") else "Додав коментар",
+        f"{b.get('who')} · {RESERVE_FOR.get(reserve.program_code(d.get('program')), '')}"
+        + (f" · «{(d.get('note') or '').strip()}»" if (d.get("note") or "").strip() else "")),
+    "lh_stream_create": lambda d, b, r: ("Налаштування LH", "Зберіг потік",
+        f"{PROG_NAME.get(d.get('program'), d.get('program'))} {d.get('year')} · {d.get('dateStart') or '—'} – {d.get('dateEnd') or '—'}"),
+    "lh_stream_delete": lambda d, b, r: ("Налаштування LH", "Видалив потік",
+        f"{PROG_NAME.get(request.view_args.get('program'), request.view_args.get('program'))} {request.view_args.get('year')}"),
+    "lh_participant_add": lambda d, b, r: ("Налаштування LH", "Додав учасника",
+        f"{d.get('name', '')} · {PROG_NAME.get(d.get('program'), d.get('program'))} {d.get('year', '')}"),
+    "lh_participant_update": _audit_lh_update,
+    "lh_participant_delete": lambda d, b, r: ("Налаштування LH", "Видалив учасника",
+        f"{b.get('name', '')} · {PROG_NAME.get(b.get('program'), b.get('program'))} {b.get('year', '')}"),
+    "set_position_config": lambda d, b, r: ("Налаштування", "Класифікував посаду",
+        f"{d.get('position', '')} · {d.get('segment') or ''}{' · перша лінія' if d.get('firstLine') else ''}"),
+    "kpi_manual_save": lambda d, b, r: ("KPI", "Вніс значення KPI", f"{d.get('kpi', '')} · {d.get('period', '')}"),
+    "set_category_criteria": lambda d, b, r: ("Налаштування", "Змінив критерії категорій", d.get("position")),
+    "create_aep_name_alias": lambda d, b, r: ("AEP", "Об'єднав імена", None),
+    "delete_aep_name_alias": lambda d, b, r: ("AEP", "Скасував об'єднання імен", None),
+    "create_aep_name_dismissal": lambda d, b, r: ("AEP", "Відхилив підказку імені", None),
+    "delete_aep_name_dismissal": lambda d, b, r: ("AEP", "Повернув підказку імені", None),
+    "dedupe_aep_roster": lambda d, b, r: ("AEP", "Прибрав дубль у ростері", None),
+    "dismiss_aep_roster_dup": lambda d, b, r: ("AEP", "Позначив «не дубль»", f"{d.get('nameA', '')} / {d.get('nameB', '')}"),
+    "undo_aep_roster_dup_dismiss": lambda d, b, r: ("AEP", "Скасував «не дубль»", None),
+    "access_rule_save": lambda d, b, r: ("Доступ", "Змінив правило" if d.get("id") else "Додав правило",
+        f"{ACCESS_ROLE_NAMES.get(d.get('role'), d.get('role'))} · {d.get('field')} {d.get('op') or 'contains'} «{d.get('value', '')}»"),
+    "access_rule_delete": lambda d, b, r: ("Доступ", "Видалив правило",
+        f"{ACCESS_ROLE_NAMES.get(b.get('role'), b.get('role'))} · {b.get('field')} {b.get('op')} «{b.get('value', '')}»"),
+}
+
+
+@app.before_request
+def audit_capture():
+    if request.method != "GET" and request.endpoint in AUDIT and current_role():
+        try:
+            g.audit_before = _audit_before()
+        except Exception:  # noqa: BLE001 — the log never blocks the change
+            g.audit_before = {}
+
+
+@app.after_request
+def audit_write(resp):
+    fn = AUDIT.get(request.endpoint)
+    if fn and request.method != "GET" and resp.status_code < 400 and current_role():
+        try:
+            out = fn(request.get_json(silent=True) or {}, getattr(g, "audit_before", {}),
+                     (resp.get_json(silent=True) if resp.is_json else None) or {})
+            if out:
+                audit(*out)
+        except Exception as e:  # noqa: BLE001
+            app.logger.warning("audit failed for %s: %s", request.endpoint, e)
+    return resp
 
 
 # ---------- static / SPA ----------
@@ -421,19 +788,69 @@ def feed_sync():
     client = FeedClient()
     try:
         client.login(login, password)
-        att_reports = []
-        if "attestation" in reports:
-            _, att_reports = fetch_attestation_reports(client, att_period, period or "current_quarter")
-        sellers_rows = fetch_sellers_report(client, period) if "sellers" in reports else None
-        overall_rows = fetch_overall_report(client, period) if "overall" in reports else None
-        months = [(quarter - 1) * 3 + i for i in (1, 2, 3)]
-        trainees_by_month = {m: fetch_trainees(client, year, m) for m in months} if "trainees" in reports else {}
+        result = run_feed_sync(client, year, quarter, period, reports)
     except FeedError as e:
         return jsonify({"error": str(e)}), 502
+    if not result["saved"] and not result["skipped"]:
+        return jsonify({"error": f"У Feed немає атестаційних занять за {label}"}), 404
+    return jsonify({"ok": True, **result})
+
+
+def _stored_coverage(stream_type, stream_key, label):
+    """(regions, rows) already stored for this report period, or None."""
+    conn = db.get_db()
+    try:
+        p = conn.execute("SELECT id FROM periods WHERE stream_type=? AND stream_key=? AND label=?",
+                         (stream_type, stream_key, label)).fetchone()
+        if not p:
+            return None
+        r = conn.execute("SELECT COUNT(DISTINCT region) AS regs, COUNT(*) AS n FROM details WHERE period_id=?",
+                         (p["id"],)).fetchone()
+        return r["regs"], r["n"]
+    finally:
+        conn.close()
+
+
+def _looks_partial(new_regions, new_rows, stored):
+    """Auto sync guard: Feed gives a person only what their rights cover, so
+    a regional login may get one region. Don't let that overwrite the whole
+    network — skip when it covers fewer regions, or under 90% of the people,
+    than what is already stored."""
+    if not stored:
+        return False
+    regs, n = stored
+    return new_regions < regs or new_rows < n * 0.9
+
+
+FEED_PARTIAL = "У Feed видно менше регіонів або людей, ніж уже є на дашборді — не перезаписано"
+
+
+def run_feed_sync(client, year, quarter, period, reports, guard=False):
+    """Fetch and save the chosen reports for one quarter with an already
+    logged-in FeedClient. guard=True (sync on login) skips any report that
+    looks narrower than what is stored (see _looks_partial)."""
+    label = f"{quarter} квартал {year}"
+    att_reports = []
+    if "attestation" in reports:
+        _, att_reports = fetch_attestation_reports(client, f"{year}-{quarter}", period or "current_quarter")
+    sellers_rows = fetch_sellers_report(client, period) if "sellers" in reports else None
+    overall_rows = fetch_overall_report(client, period) if "overall" in reports else None
+    months = [(quarter - 1) * 3 + i for i in (1, 2, 3)]
+    trainees_by_month = {m: fetch_trainees(client, year, m) for m in months} if "trainees" in reports else {}
 
     saved, skipped = [], []
+    partial = FEED_PARTIAL
 
     def save(stream_type, rows, att_type=None):
+        if guard:
+            regions = len({str(r.get("region") or "").strip() for r in rows if r.get("region")})
+            if stream_type == "overall":
+                key = "overall"
+            else:
+                key, _ = detect_attestation_stream([clean_row(r) for r in rows])
+            if key and _looks_partial(regions, len(rows), _stored_coverage(stream_type, key, label)):
+                skipped.append({"streamType": stream_type, "attType": att_type, "reason": partial})
+                return
         try:
             result = save_lms_period(stream_type, label, rows)
         except UploadError as e:
@@ -459,12 +876,124 @@ def feed_sync():
     elif "overall" in reports:
         skipped.append({"streamType": "overall", "attType": None, "reason": f"У Feed немає занять за {label}"})
     if trainees_by_month:
-        counts = save_trainees(year, trainees_by_month)
-        saved.append({"streamType": "trainees", "attType": None, "streamKey": "Стажери",
-                      "rowsCount": sum(counts.values()), "unclassifiedPositions": []})
-    if not saved and not skipped:
-        return jsonify({"error": f"У Feed немає атестаційних занять за {label}"}), 404
-    return jsonify({"ok": True, "label": label, "saved": saved, "skipped": skipped})
+        if guard:
+            conn = db.get_db()
+            for m in list(trainees_by_month):
+                old = conn.execute("SELECT COUNT(DISTINCT region) AS regs, COUNT(*) AS n FROM trainees WHERE year=? AND month=?",
+                                   (year, m)).fetchone()
+                new = trainees_by_month[m]
+                regs = len({str((e.get("user") or {}).get("reg") or "").strip() for e in new} - {""})
+                if old["n"] and _looks_partial(regs, len(new), (old["regs"], old["n"])):
+                    trainees_by_month.pop(m)
+            conn.close()
+            if len(trainees_by_month) < len(months):
+                skipped.append({"streamType": "trainees", "attType": None, "reason": partial})
+        if trainees_by_month:
+            counts = save_trainees(year, trainees_by_month)
+            saved.append({"streamType": "trainees", "attType": None, "streamKey": "Стажери",
+                          "rowsCount": sum(counts.values()), "unclassifiedPositions": []})
+    return {"label": label, "saved": saved, "skipped": skipped}
+
+
+# ---- sync on login: whoever logs in through Feed (admin or Регіональна
+# команда) refreshes the current quarter in the background with the Feed
+# session that login just opened — the password is not kept. At most once
+# per FEED_AUTO_HOURS, one run at a time.
+FEED_AUTO_HOURS = float(os.environ.get("FEED_AUTO_HOURS", "6"))
+FEED_AUTO_REPORTS = ["attestation", "sellers", "overall", "trainees"]
+FEED_AUTO = {"running": False, "startedAt": None, "by": None}
+_feed_auto_lock = threading.Lock()
+
+
+def _feed_auto_last(conn):
+    r = conn.execute("SELECT rows, uploaded_at FROM data_uploads WHERE kind='feed_auto'").fetchone()
+    return (r["uploaded_at"], r["rows"]) if r else (None, None)
+
+
+def _prev_quarter(today=None):
+    today = today or datetime.date.today()
+    year, quarter = today.year, (today.month - 1) // 3 + 1
+    return (year - 1, 4) if quarter == 1 else (year, quarter - 1)
+
+
+def _prev_quarter_pending(conn):
+    """The previous quarter's final results haven't been pulled yet — the
+    first sync of a new quarter does it (and keeps trying until it works)."""
+    y, q = _prev_quarter()
+    r = conn.execute("SELECT rows FROM data_uploads WHERE kind='feed_auto_prev'").fetchone()
+    return not r or r["rows"] != y * 10 + q
+
+
+def maybe_start_feed_auto(client, who):
+    conn = db.get_db()
+    try:
+        last, _ = _feed_auto_last(conn)
+        pending = _prev_quarter_pending(conn)
+    finally:
+        conn.close()
+    if last and not pending:
+        age = datetime.datetime.utcnow() - datetime.datetime.fromisoformat(last.rstrip("Z"))
+        if age.total_seconds() < FEED_AUTO_HOURS * 3600:
+            return False
+    if not _feed_auto_lock.acquire(blocking=False):
+        return False
+    FEED_AUTO.update(running=True, startedAt=datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z", by=who)
+    threading.Thread(target=_feed_auto_run, args=(client, who), daemon=True).start()
+    return True
+
+
+def _feed_auto_run(client, who):
+    today = datetime.date.today()
+    year, quarter = today.year, (today.month - 1) // 3 + 1
+    jobs = [(year, quarter, "current_quarter")]
+    conn = db.get_db()
+    try:
+        if _prev_quarter_pending(conn):
+            # first sync in a new quarter: the previous one's final results too
+            jobs.insert(0, (*_prev_quarter(today), "previous_quarter"))
+    finally:
+        conn.close()
+    prev_done = False
+    try:
+        notes, n = [], 0
+        for y, q, period in jobs:
+            try:
+                res = run_feed_sync(client, y, q, period, FEED_AUTO_REPORTS, guard=True)
+                note = f"{res['label']}: збережено {len(res['saved'])}"
+                if res["skipped"]:
+                    note += f", пропущено {len(res['skipped'])}"
+                n += len(res["saved"])
+                # a regional login that only saw part of the network leaves
+                # the previous quarter pending for someone who sees it all
+                if period == "previous_quarter" and not any(x["reason"] == FEED_PARTIAL for x in res["skipped"]):
+                    prev_done = True
+            except Exception as e:  # noqa: BLE001 — logged, never breaks the login
+                note = f"{q} квартал {y}: помилка — {str(e)[:200]}"
+            notes.append(note)
+        note = "автооновлення " + "; ".join(notes)
+        conn = db.get_db()
+        try:
+            _mark_upload(conn, "feed_auto", n)
+            if prev_done:
+                y, q = _prev_quarter(today)
+                _mark_upload(conn, "feed_auto_prev", y * 10 + q)
+            conn.commit()
+            audit("Feed", "Автооновлення", note.removeprefix("автооновлення "), who=who, conn=conn)
+        finally:
+            conn.close()
+    finally:
+        FEED_AUTO.update(running=False)
+        _feed_auto_lock.release()
+
+
+@app.get("/api/feed-auto")
+def feed_auto_status():
+    conn = db.get_db()
+    try:
+        last, n = _feed_auto_last(conn)
+    finally:
+        conn.close()
+    return jsonify({"running": FEED_AUTO["running"], "lastAt": last, "lastSaved": n})
 
 
 # ---------- Кадровий резерв (Leader Hub) ----------
@@ -495,8 +1024,7 @@ def upload_lh_participants():
 
     clean = []
     for r in rows:
-        prog = str(r.get("program") or "").upper().replace(" ", "").replace(".0", "")
-        prog = "LH2" if "2" in prog else "LH1"
+        prog = reserve.program_code(r.get("program"))
         try:
             year = int(float(r.get("year")))
         except (TypeError, ValueError):
@@ -526,7 +1054,7 @@ def upload_lh_participants():
         )
         # optional «Потоки» sheet: stream dates
         for st in data.get("streams") or []:
-            sp = "LH2" if "2" in str(st.get("program") or "").replace(".0", "") else "LH1"
+            sp = reserve.program_code(st.get("program"))
             try:
                 sy = int(float(st.get("year")))
             except (TypeError, ValueError):
@@ -603,7 +1131,10 @@ def employees_search():
     """Current state of people in the employee history, by name or tab —
     for adding participants to a Leader Hub stream."""
     q = (request.args.get("q") or "").strip()
-    if len(q) < 2:
+    store = (request.args.get("store") or "").strip()  # everyone working in one store
+    # potentials: only the posts we consider toward that post
+    pot_from = reserve.POTENTIAL_FROM.get(request.args.get("potential") or "")
+    if len(q) < 2 and not store:
         return jsonify({"employees": []})
     conn = db.get_db()
     up = conn.execute("SELECT uploaded_at FROM data_uploads WHERE kind = 'employee_history'").fetchone()
@@ -617,13 +1148,19 @@ def employees_search():
         "WHERE h.date_start = (SELECT MAX(date_start) FROM employee_history WHERE tab = h.tab) "
         "AND h.status != 'Звільнений' AND h.date_end >= ?",
         (as_of,),
-    ) if r["tab"] == q or (words and all(w in reserve.name_key(r["name"]) for w in words))]
-    rows.sort(key=lambda r: r["name"] or "")
-    rows = rows[:30]
+    ) if (not store or r["store"] == store) and (not pot_from or reserve.position_info(r["position"])[0] in pot_from) and (
+        len(q) < 2 or r["tab"] == q or (words and all(w in reserve.name_key(r["name"]) for w in words)))]
+    if store:  # the store's team: senior posts first
+        rows.sort(key=lambda r: (-(reserve.position_info(r["position"])[1] or 0), r["name"] or ""))
+        rows = rows[:300]
+    else:
+        rows.sort(key=lambda r: r["name"] or "")
+        rows = rows[:30]
     conn.close()
     # only people who work now (as of the employee-history upload)
     return jsonify({"employees": [{
-        "tab": r["tab"], "name": r["name"], "position": reserve.position_info(r["position"])[0], "store": r["store"],
+        "tab": r["tab"], "name": r["name"], "position": reserve.position_info(r["position"])[0],
+        "rank": reserve.position_info(r["position"])[1], "store": r["store"],
         "region": r["region"], "working": True,
     } for r in rows]})
 
@@ -631,7 +1168,7 @@ def employees_search():
 @app.post("/api/lh-streams")
 def lh_stream_create():
     data = request.get_json(silent=True) or {}
-    prog = "LH2" if str(data.get("program")) == "LH2" else "LH1"
+    prog = reserve.program_code(data.get("program"))
     try:
         year = int(data.get("year"))
     except (TypeError, ValueError):
@@ -665,7 +1202,7 @@ def lh_participant_add():
     """Add a person from the employee history to a stream; start region /
     store / position are their current ones."""
     data = request.get_json(silent=True) or {}
-    prog = "LH2" if str(data.get("program")) == "LH2" else "LH1"
+    prog = reserve.program_code(data.get("program"))
     try:
         year = int(data.get("year"))
     except (TypeError, ValueError):
@@ -726,6 +1263,32 @@ def lh_participant_delete(pid):
     return jsonify({"ok": True})
 
 
+def _auto_potential(conn, pid, prog):
+    """In the programme with ІПР / Сертифікований — a potential without a mark by hand."""
+    if pid.startswith("p") and pid[1:].isdigit():
+        return bool(conn.execute("SELECT 1 FROM lh_participants WHERE id = ? AND program = ? AND status IN ('ІПР','Сертифікований')",
+                                 (int(pid[1:]), prog)).fetchone())
+    rows = conn.execute("SELECT tab, name FROM lh_participants WHERE program = ? AND status IN ('ІПР','Сертифікований')", (prog,)).fetchall()
+    if any((r["tab"] or "").strip() == pid for r in rows):
+        return True
+    h = conn.execute("SELECT name FROM employee_history WHERE tab = ? ORDER BY date_start DESC LIMIT 1", (pid,)).fetchone()
+    key = reserve.name_key(h["name"]) if h else None
+    return bool(key) and any(not (r["tab"] or "").strip() and reserve.name_key(r["name"]) == key for r in rows)
+
+
+def _hr_reserve_check(conn, pid, prog, status):
+    """HR may add / keep / remove potentials — nothing else in the reserve."""
+    cur = conn.execute("SELECT status FROM reserve_status WHERE pid = ? AND program = ?", (pid, prog)).fetchone()
+    cur = cur["status"] if cur else None
+    if status == "Потенційний" and cur in (None, "Потенційний", "Не в резерві"):
+        return None
+    if status == "" and cur == "Потенційний":
+        return None
+    if status == "Не в резерві" and cur in (None, "Потенційний") and _auto_potential(conn, pid, prog):
+        return None
+    return "Можна змінювати лише потенційних"
+
+
 @app.put("/api/reserve-status")
 def reserve_status_set():
     """Set (or clear — empty status) the reserve status of a person for a
@@ -746,6 +1309,21 @@ def reserve_status_set():
     if not known:
         conn.close()
         return jsonify({"error": "Працівника не знайдено"}), 404
+    if current_role() == "hr":  # HR: only the potentials
+        err = _hr_reserve_check(conn, pid, prog, status)
+        if err:
+            conn.close()
+            return jsonify({"error": err}), 403
+        if status == "Потенційний" and not _auto_potential(conn, pid, prog):
+            data["check"] = True
+    if status == "Потенційний" and data.get("check"):
+        # adding a new potential: only from the posts we consider toward that post
+        cur = conn.execute("SELECT position FROM employee_history WHERE tab = ? AND status != 'Звільнений' "
+                           "ORDER BY date_start DESC LIMIT 1", (pid,)).fetchone()
+        pos = reserve.position_info(cur["position"])[0] if cur else None
+        if pos not in reserve.POTENTIAL_FROM[prog]:
+            conn.close()
+            return jsonify({"error": f"{pos or 'Ця посада'}: не розглядаємо як потенційного на цю посаду"}), 400
     if not status:
         conn.execute("DELETE FROM reserve_status WHERE pid = ? AND program = ?", (pid, prog))
     elif status not in reserve.RESERVE_MANUAL_STATUSES:
@@ -753,11 +1331,63 @@ def reserve_status_set():
         return jsonify({"error": "Невідомий статус"}), 400
     else:
         conn.execute(
-            "INSERT INTO reserve_status (pid, program, status, note, updated_at) VALUES (?,?,?,?,?) "
+            "INSERT INTO reserve_status (pid, program, status, note, updated_at, updated_by) VALUES (?,?,?,?,?,?) "
             "ON CONFLICT(pid, program) DO UPDATE SET status = excluded.status, note = excluded.note, "
-            "updated_at = excluded.updated_at",
-            (pid, prog, status, note or None, datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"),
+            "updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+            (pid, prog, status, note or None, datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+             current_user_label() or None),
         )
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.put("/api/admin-note")
+def admin_note_set():
+    """Admin-only comment on a programme participant (HR is blocked in
+    require_auth: not in HR_WRITE). Key: pid|program|year; empty removes."""
+    data = request.get_json(silent=True) or {}
+    pid = str(data.get("pid") or "").strip()
+    prog = reserve.program_code(data.get("program"))
+    try:
+        year = int(data.get("year"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Не вказано потік"}), 400
+    if not pid:
+        return jsonify({"error": "Не вказано працівника"}), 400
+    key, note = f"{pid}|{prog}|{year}", str(data.get("note") or "").strip()[:1000]
+    conn = db.get_db()
+    if note:
+        conn.execute(
+            "INSERT INTO admin_notes (key, note, updated_at, updated_by) VALUES (?,?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+            (key, note, _now(), current_user_label() or None))
+    else:
+        conn.execute("DELETE FROM admin_notes WHERE key = ?", (key,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+@app.put("/api/reserve-note")
+def reserve_note_set():
+    """Comment on a person in the reserve — anyone with access (HR too);
+    an empty note removes it."""
+    data = request.get_json(silent=True) or {}
+    pid = str(data.get("pid") or "").strip()
+    prog = reserve.program_code(data.get("program"))
+    note = str(data.get("note") or "").strip()[:500]
+    if not pid:
+        return jsonify({"error": "Не вказано працівника"}), 400
+    conn = db.get_db()
+    if note:
+        conn.execute(
+            "INSERT INTO reserve_notes (pid, program, note, updated_at, updated_by) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(pid, program) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at, "
+            "updated_by = excluded.updated_by",
+            (pid, prog, note, _now(), current_user_label() or None))
+    else:
+        conn.execute("DELETE FROM reserve_notes WHERE pid = ? AND program = ?", (pid, prog))
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
@@ -781,6 +1411,10 @@ def reserve_view():
     data["statuses"] = reserve.PROGRAM_STATUSES
     data["lh2OnlyStatuses"] = sorted(reserve.LH2_ONLY_STATUSES)
     data["reserveStatuses"] = reserve.RESERVE_MANUAL_STATUSES
+    # admin-only comments on participants: the regional team never gets them
+    data["adminNotes"] = {} if current_role() != "admin" else {
+        r["key"]: {"note": r["note"], "at": r["updated_at"], "by": r["updated_by"] or ""}
+        for r in conn.execute("SELECT key, note, updated_at, updated_by FROM admin_notes")}
     conn.close()
     return jsonify(data)
 
@@ -1507,631 +2141,6 @@ def undo_aep_roster_dup_dismiss(dismissal_id):
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
-
-
-# ---------- "Звіт для РК" — director АТТ + Додаткове навчання ----------
-# Same growing-file model as AEP: one row per topic per director per
-# quarter, quarter resolved client-side from the row's own date, re-upload
-# replaces only the quarters present in that upload.
-
-@app.post("/api/upload-director-report")
-def upload_director_report():
-    data = request.get_json(silent=True) or {}
-    raw_rows = data.get("rows") or []
-    if not raw_rows:
-        return jsonify({"error": "Не знайдено жодного рядка"}), 400
-
-    groups = {}
-    for r in raw_rows:
-        year, quarter = r.get("year"), r.get("quarter")
-        if not year or not quarter:
-            continue
-        groups.setdefault((int(year), int(quarter)), []).append(r)
-
-    if not groups:
-        return jsonify({"error": "Не вдалося визначити рік/квартал жодного рядка"}), 400
-
-    conn = db.get_db()
-    summary = []
-    try:
-        conn.execute("BEGIN")
-        for (year, quarter) in groups:
-            conn.execute(
-                "DELETE FROM director_report_details WHERE period_year=? AND period_quarter=?",
-                (year, quarter),
-            )
-        uploaded_at = datetime.datetime.utcnow().isoformat() + "Z"
-        for (year, quarter), group_rows in sorted(groups.items()):
-            rows = [clean_director_report_row(r) for r in group_rows]
-            rows = [r for r in rows if r["topic"] and r["trainingType"]]
-            for r in rows:
-                conn.execute(
-                    "INSERT INTO director_report_details (period_year, period_quarter, topic, training_type, "
-                    "region, store, position, name, score, uploaded_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (year, quarter, r["topic"], r["trainingType"], r["region"], r["store"],
-                     r["position"], r["name"], r["score"], uploaded_at),
-                )
-            summary.append({"year": year, "quarter": quarter, "label": f"Q{quarter} {year}", "rows": len(rows)})
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-    return jsonify({"ok": True, "quarters": summary})
-
-
-@app.get("/api/director-report-last-updated")
-def director_report_last_updated():
-    conn = db.get_db()
-    row = conn.execute("SELECT MAX(uploaded_at) AS last FROM director_report_details").fetchone()
-    conn.close()
-    return jsonify({"lastUpdated": row["last"]})
-
-
-@app.get("/api/director-report-periods")
-def director_report_periods():
-    conn = db.get_db()
-    rows = conn.execute(
-        "SELECT DISTINCT period_year, period_quarter FROM director_report_details "
-        "ORDER BY period_year, period_quarter"
-    ).fetchall()
-    conn.close()
-    periods = [
-        {"year": r["period_year"], "quarter": r["period_quarter"], "label": f"Q{r['period_quarter']} {r['period_year']}"}
-        for r in rows
-    ]
-    return jsonify({"periods": periods})
-
-
-@app.get("/api/director-report-filters")
-def director_report_filters():
-    year, quarter = request.args.get("year"), request.args.get("quarter")
-    region = request.args.get("region")
-    if not year or not quarter:
-        return jsonify({"error": "year і quarter обов'язкові"}), 400
-    conn = db.get_db()
-    regions = conn.execute(
-        "SELECT DISTINCT region FROM director_report_details "
-        "WHERE period_year=? AND period_quarter=? AND region != '' ORDER BY region",
-        (year, quarter),
-    ).fetchall()
-    store_where = "period_year=? AND period_quarter=? AND store != ''"
-    store_params = [year, quarter]
-    if region:
-        store_where += " AND region=?"
-        store_params.append(region)
-    stores = conn.execute(
-        f"SELECT DISTINCT store FROM director_report_details WHERE {store_where} ORDER BY store",
-        store_params,
-    ).fetchall()
-    conn.close()
-    return jsonify({"regions": [r["region"] for r in regions], "stores": [r["store"] for r in stores]})
-
-
-def _director_report_where(args):
-    clauses = ["period_year=?", "period_quarter=?"]
-    params = [args.get("year"), args.get("quarter")]
-    if args.get("region"):
-        clauses.append("region=?")
-        params.append(args["region"])
-    if args.get("store"):
-        clauses.append("store=?")
-        params.append(args["store"])
-    return " AND ".join(clauses), params
-
-
-@app.get("/api/director-report-raw")
-def director_report_raw():
-    """All rows for one quarter, unfiltered — used only by the client-side
-    HTML export (downloadDirectorReportHtml), which bakes them into the
-    downloaded file so region/store filtering keeps working with zero
-    server round trips once it's out of the browser."""
-    year, quarter = request.args.get("year"), request.args.get("quarter")
-    if not year or not quarter:
-        return jsonify({"error": "year і quarter обов'язкові"}), 400
-    conn = db.get_db()
-    rows = conn.execute(
-        "SELECT topic, training_type, region, store, name, score FROM director_report_details "
-        "WHERE period_year=? AND period_quarter=?",
-        (year, quarter),
-    ).fetchall()
-    conn.close()
-    return jsonify({"rows": [
-        {"topic": r["topic"], "trainingType": r["training_type"], "region": r["region"],
-         "store": r["store"], "name": r["name"], "score": r["score"]}
-        for r in rows
-    ]})
-
-
-@app.get("/api/director-report-raw-all")
-def director_report_raw_all():
-    """Every row across every uploaded quarter, unfiltered — used only by
-    the standalone HTML export to compute the "historically low" card
-    (and its per-person quarter trend) entirely offline, since that
-    analysis spans quarters rather than the one the export was taken
-    for."""
-    conn = db.get_db()
-    rows = conn.execute(
-        "SELECT period_year, period_quarter, training_type, region, store, name, score "
-        "FROM director_report_details"
-    ).fetchall()
-    conn.close()
-    return jsonify({"rows": [
-        {"year": r["period_year"], "quarter": r["period_quarter"], "trainingType": r["training_type"],
-         "region": r["region"], "store": r["store"], "name": r["name"], "score": r["score"]}
-        for r in rows
-    ]})
-
-
-def _director_report_historical_people(region=None, store=None):
-    """Per-director averages across EVERY uploaded quarter (not just the
-    one currently selected) — only people present in at least 2 distinct
-    quarters count, so a single bad quarter doesn't get flagged as a
-    historical pattern."""
-    clauses = ["name != ''"]
-    params = []
-    if region:
-        clauses.append("region=?")
-        params.append(region)
-    if store:
-        clauses.append("store=?")
-        params.append(store)
-    where = " AND ".join(clauses)
-    conn = db.get_db()
-    rows = conn.execute(
-        f"SELECT period_year, period_quarter, training_type, region, store, name, score "
-        f"FROM director_report_details WHERE {where}",
-        params,
-    ).fetchall()
-    conn.close()
-
-    people = {}
-    for r in rows:
-        p = people.setdefault(r["name"], {
-            "name": r["name"], "region": r["region"], "store": r["store"],
-            "latestKey": None, "quarters": set(),
-            "attSum": 0.0, "attCount": 0, "addSum": 0.0, "addCount": 0,
-            "allSum": 0.0, "allCount": 0,
-        })
-        qkey = (r["period_year"], r["period_quarter"])
-        p["quarters"].add(qkey)
-        if p["latestKey"] is None or qkey > p["latestKey"]:
-            p["latestKey"] = qkey
-            p["region"] = r["region"]
-            p["store"] = r["store"]
-        p["allSum"] += r["score"]
-        p["allCount"] += 1
-        if r["training_type"] == "АТТ":
-            p["attSum"] += r["score"]
-            p["attCount"] += 1
-        elif r["training_type"] == "Додаткове навчання":
-            p["addSum"] += r["score"]
-            p["addCount"] += 1
-
-    result = []
-    for p in people.values():
-        if len(p["quarters"]) < 2:
-            continue
-        result.append({
-            "name": p["name"], "region": p["region"], "store": p["store"],
-            "quarterCount": len(p["quarters"]),
-            "att": round(p["attSum"] / p["attCount"], 1) if p["attCount"] else None,
-            "additional": round(p["addSum"] / p["addCount"], 1) if p["addCount"] else None,
-            "overall": round(p["allSum"] / p["allCount"], 1) if p["allCount"] else None,
-        })
-    return result
-
-
-DIRECTOR_REPORT_HISTORICAL_LOW_THRESHOLD = 70  # below this = needs priority attention
-
-
-@app.get("/api/director-report-historical-low")
-def director_report_historical_low():
-    people = _director_report_historical_people(request.args.get("region"), request.args.get("store"))
-    people = [p for p in people if p["overall"] is not None and p["overall"] < DIRECTOR_REPORT_HISTORICAL_LOW_THRESHOLD]
-    people.sort(key=lambda p: (p["overall"], -p["quarterCount"]))
-    return jsonify({"people": people[:100], "threshold": DIRECTOR_REPORT_HISTORICAL_LOW_THRESHOLD})
-
-
-@app.get("/api/director-report-historical-trend")
-def director_report_historical_trend():
-    """Per-quarter breakdown for one director — the drill-down behind a
-    row in the historically-low table."""
-    name = request.args.get("name")
-    if not name:
-        return jsonify({"error": "name обов'язкове"}), 400
-    conn = db.get_db()
-    rows = conn.execute(
-        "SELECT period_year, period_quarter, "
-        "AVG(CASE WHEN training_type='АТТ' THEN score END) AS att, "
-        "AVG(CASE WHEN training_type='Додаткове навчання' THEN score END) AS additional, "
-        "AVG(score) AS overall "
-        "FROM director_report_details WHERE name=? "
-        "GROUP BY period_year, period_quarter ORDER BY period_year, period_quarter",
-        (name,),
-    ).fetchall()
-    conn.close()
-    return jsonify({"quarters": [{
-        "year": r["period_year"], "quarter": r["period_quarter"],
-        "att": round(r["att"], 1) if r["att"] is not None else None,
-        "additional": round(r["additional"], 1) if r["additional"] is not None else None,
-        "overall": round(r["overall"], 1) if r["overall"] is not None else None,
-    } for r in rows]})
-
-
-@app.get("/api/director-report-summary")
-def director_report_summary():
-    year, quarter = request.args.get("year"), request.args.get("quarter")
-    if not year or not quarter:
-        return jsonify({"error": "year і quarter обов'язкові"}), 400
-    where, params = _director_report_where(request.args)
-    conn = db.get_db()
-
-    def avg_for(training_type=None):
-        w, p = where, list(params)
-        if training_type:
-            w += " AND training_type=?"
-            p.append(training_type)
-        return conn.execute(
-            f"SELECT AVG(score) AS avg, COUNT(*) AS c FROM director_report_details WHERE {w}",
-            p,
-        ).fetchone()
-
-    att = avg_for("АТТ")
-    additional = avg_for("Додаткове навчання")
-    overall = avg_for(None)
-    conn.close()
-    return jsonify({
-        "att": round(att["avg"], 1) if att["avg"] is not None else None,
-        "additional": round(additional["avg"], 1) if additional["avg"] is not None else None,
-        "overall": round(overall["avg"], 1) if overall["avg"] is not None else None,
-        "count": overall["c"],
-    })
-
-
-@app.get("/api/director-report-by-region")
-def director_report_by_region():
-    """Always the full region breakdown (ignores the region/store filter —
-    that's the point: an at-a-glance table across every region, like the
-    source workbook's "ЗАГАЛЬНИЙ АТТ" sheet)."""
-    year, quarter = request.args.get("year"), request.args.get("quarter")
-    if not year or not quarter:
-        return jsonify({"error": "year і quarter обов'язкові"}), 400
-    conn = db.get_db()
-    rows = conn.execute(
-        "SELECT region, "
-        "AVG(CASE WHEN training_type='АТТ' THEN score END) AS att, "
-        "AVG(CASE WHEN training_type='Додаткове навчання' THEN score END) AS additional, "
-        "AVG(score) AS overall "
-        "FROM director_report_details WHERE period_year=? AND period_quarter=? AND region != '' "
-        "GROUP BY region ORDER BY overall DESC",
-        (year, quarter),
-    ).fetchall()
-    conn.close()
-    return jsonify({"regions": [{
-        "region": r["region"],
-        "att": round(r["att"], 1) if r["att"] is not None else None,
-        "additional": round(r["additional"], 1) if r["additional"] is not None else None,
-        "overall": round(r["overall"], 1) if r["overall"] is not None else None,
-    } for r in rows]})
-
-
-@app.get("/api/director-report-by-employee")
-def director_report_by_employee():
-    """Per-employee breakdown within the selected region (and optionally
-    store) — shown instead of the by-region table once a region is picked,
-    since "all regions at a glance" stops being the useful view at that
-    point."""
-    year, quarter = request.args.get("year"), request.args.get("quarter")
-    if not year or not quarter:
-        return jsonify({"error": "year і quarter обов'язкові"}), 400
-    where, params = _director_report_where(request.args)
-    conn = db.get_db()
-    rows = conn.execute(
-        f"SELECT name, store, "
-        f"AVG(CASE WHEN training_type='АТТ' THEN score END) AS att, "
-        f"AVG(CASE WHEN training_type='Додаткове навчання' THEN score END) AS additional, "
-        f"AVG(score) AS overall "
-        f"FROM director_report_details WHERE {where} AND name != '' "
-        f"GROUP BY name, store ORDER BY overall DESC",
-        params,
-    ).fetchall()
-    conn.close()
-    return jsonify({"employees": [{
-        "name": r["name"],
-        "store": r["store"],
-        "att": round(r["att"], 1) if r["att"] is not None else None,
-        "additional": round(r["additional"], 1) if r["additional"] is not None else None,
-        "overall": round(r["overall"], 1) if r["overall"] is not None else None,
-    } for r in rows]})
-
-
-@app.get("/api/director-report-employee-topics")
-def director_report_employee_topics():
-    """Per-topic breakdown for one director — the drill-down behind a row
-    in the by-employee table (store is included to disambiguate same-name
-    directors across different stores)."""
-    year, quarter = request.args.get("year"), request.args.get("quarter")
-    name = request.args.get("name")
-    if not year or not quarter or not name:
-        return jsonify({"error": "year, quarter і name обов'язкові"}), 400
-    where, params = _director_report_where(request.args)
-    where += " AND name=?"
-    params = params + [name]
-    conn = db.get_db()
-    rows = conn.execute(
-        f"SELECT topic, training_type, score FROM director_report_details "
-        f"WHERE {where} ORDER BY training_type, topic",
-        params,
-    ).fetchall()
-    conn.close()
-    return jsonify({"topics": [
-        {"topic": r["topic"], "trainingType": r["training_type"], "score": r["score"]}
-        for r in rows
-    ]})
-
-
-@app.get("/api/director-report-topics")
-def director_report_topics():
-    year, quarter = request.args.get("year"), request.args.get("quarter")
-    if not year or not quarter:
-        return jsonify({"error": "year і quarter обов'язкові"}), 400
-    where, params = _director_report_where(request.args)
-    conn = db.get_db()
-    rows = conn.execute(
-        f"SELECT topic, training_type, AVG(score) AS avg, COUNT(*) AS c, "
-        f"SUM(CASE WHEN score > 0 THEN 1 ELSE 0 END) AS passed FROM director_report_details "
-        f"WHERE {where} GROUP BY topic, training_type ORDER BY training_type, topic",
-        params,
-    ).fetchall()
-    conn.close()
-    return jsonify({"topics": [{
-        "topic": r["topic"], "trainingType": r["training_type"], "avg": round(r["avg"], 1), "count": r["c"],
-        "completionRate": round((r["passed"] / r["c"]) * 100, 1) if r["c"] else None,
-    } for r in rows]})
-
-
-@app.get("/api/director-report-top")
-def director_report_top():
-    """Best performers this quarter in one combined ranking — position is
-    the arithmetic mean of the person's average АТТ score and average
-    "Додаткове навчання" score (unweighted by how many topics each type
-    had), not the row-weighted "Загальний результат" used elsewhere."""
-    year, quarter = request.args.get("year"), request.args.get("quarter")
-    if not year or not quarter:
-        return jsonify({"error": "year і quarter обов'язкові"}), 400
-    where, params = _director_report_where(request.args)
-    conn = db.get_db()
-    rows = conn.execute(
-        f"SELECT name, region, store, "
-        f"AVG(CASE WHEN training_type='АТТ' THEN score END) AS att, "
-        f"AVG(CASE WHEN training_type='Додаткове навчання' THEN score END) AS additional "
-        f"FROM director_report_details WHERE {where} AND name != '' GROUP BY name, region, store",
-        params,
-    ).fetchall()
-    conn.close()
-    people = []
-    for r in rows:
-        att = round(r["att"], 1) if r["att"] is not None else None
-        additional = round(r["additional"], 1) if r["additional"] is not None else None
-        values = [v for v in (att, additional) if v is not None]
-        if not values:
-            continue
-        rank_score = round(sum(values) / len(values), 1)
-        if rank_score <= 90:
-            continue
-        people.append({
-            "name": r["name"], "region": r["region"], "store": r["store"],
-            "att": att, "additional": additional,
-            "rankScore": rank_score,
-        })
-    people.sort(key=lambda p: -p["rankScore"])
-    return jsonify({"people": people[:100]})
-
-
-# ---------- "Звіт по заняттям" — single-training-session reports ----------
-
-@app.post("/api/upload-lesson-report")
-def upload_lesson_report():
-    data = request.get_json(silent=True) or {}
-    lesson_key = str(data.get("lessonKey", "")).strip()
-    title = str(data.get("title", "")).strip()
-    raw_rows = data.get("rows") or []
-    if not lesson_key or not title:
-        return jsonify({"error": "Не вдалося визначити номер і назву заняття з файлу"}), 400
-    if not raw_rows:
-        return jsonify({"error": "У файлі не знайдено жодного рядка учасників"}), 400
-
-    rows = [clean_lesson_report_row(r) for r in raw_rows]
-    rows = [r for r in rows if r["name"]]
-
-    conn = db.get_db()
-    try:
-        conn.execute("BEGIN")
-        existing = conn.execute(
-            "SELECT id FROM lesson_reports WHERE lesson_key=?", (lesson_key,)
-        ).fetchone()
-        uploaded_at = datetime.datetime.utcnow().isoformat() + "Z"
-        if existing:
-            lesson_report_id = existing["id"]
-            conn.execute(
-                "UPDATE lesson_reports SET title=?, uploaded_at=? WHERE id=?",
-                (title, uploaded_at, lesson_report_id),
-            )
-            conn.execute("DELETE FROM lesson_report_details WHERE lesson_report_id=?", (lesson_report_id,))
-        else:
-            cur = conn.execute(
-                "INSERT INTO lesson_reports (lesson_key, title, uploaded_at) VALUES (?,?,?)",
-                (lesson_key, title, uploaded_at),
-            )
-            lesson_report_id = cur.lastrowid
-
-        for r in rows:
-            conn.execute(
-                "INSERT INTO lesson_report_details (lesson_report_id, region, store, position, "
-                "tab_number, name, material, test, test_date) VALUES (?,?,?,?,?,?,?,?,?)",
-                (lesson_report_id, r["region"], r["store"], r["position"], r["tabNumber"],
-                 r["name"], r["material"], r["test"], r["testDate"]),
-            )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-    return jsonify({"ok": True, "lessonReportId": lesson_report_id, "rowsCount": len(rows)})
-
-
-@app.get("/api/lesson-reports")
-def list_lesson_reports():
-    conn = db.get_db()
-    rows = conn.execute(
-        "SELECT id, lesson_key, title, uploaded_at FROM lesson_reports ORDER BY uploaded_at ASC"
-    ).fetchall()
-    conn.close()
-    return jsonify({"lessons": [
-        {"id": r["id"], "lessonKey": r["lesson_key"], "title": r["title"], "uploadedAt": r["uploaded_at"]}
-        for r in rows
-    ]})
-
-
-def _lesson_report_where(args):
-    clauses = ["lesson_report_id=?"]
-    params = [args.get("lessonReportId")]
-    if args.get("region"):
-        clauses.append("region=?")
-        params.append(args["region"])
-    if args.get("store"):
-        clauses.append("store=?")
-        params.append(args["store"])
-    if args.get("position"):
-        clauses.append("position=?")
-        params.append(args["position"])
-    return " AND ".join(clauses), params
-
-
-@app.get("/api/lesson-report-filters")
-def lesson_report_filters():
-    lesson_report_id = request.args.get("lessonReportId")
-    if not lesson_report_id:
-        return jsonify({"error": "lessonReportId обов'язковий"}), 400
-    region = request.args.get("region")
-    conn = db.get_db()
-    regions = conn.execute(
-        "SELECT DISTINCT region FROM lesson_report_details WHERE lesson_report_id=? AND region != '' ORDER BY region",
-        (lesson_report_id,),
-    ).fetchall()
-    store_where = "lesson_report_id=? AND store != ''"
-    store_params = [lesson_report_id]
-    if region:
-        store_where += " AND region=?"
-        store_params.append(region)
-    stores = conn.execute(
-        f"SELECT DISTINCT store FROM lesson_report_details WHERE {store_where} ORDER BY store",
-        store_params,
-    ).fetchall()
-    positions = conn.execute(
-        "SELECT DISTINCT position FROM lesson_report_details WHERE lesson_report_id=? AND position != '' ORDER BY position",
-        (lesson_report_id,),
-    ).fetchall()
-    conn.close()
-    return jsonify({
-        "regions": [r["region"] for r in regions],
-        "stores": [r["store"] for r in stores],
-        "positions": [r["position"] for r in positions],
-    })
-
-
-@app.get("/api/lesson-report-summary")
-def lesson_report_summary():
-    if not request.args.get("lessonReportId"):
-        return jsonify({"error": "lessonReportId обов'язковий"}), 400
-    where, params = _lesson_report_where(request.args)
-    conn = db.get_db()
-    row = conn.execute(
-        f"SELECT AVG(material) AS material, AVG(test) AS test, COUNT(*) AS total, "
-        f"SUM(CASE WHEN test >= 100 THEN 1 ELSE 0 END) AS passed "
-        f"FROM lesson_report_details WHERE {where}",
-        params,
-    ).fetchone()
-    conn.close()
-    return jsonify({
-        "material": round(row["material"], 1) if row["material"] is not None else None,
-        "test": round(row["test"], 1) if row["test"] is not None else None,
-        "total": row["total"],
-        "passed": row["passed"],
-    })
-
-
-@app.get("/api/lesson-report-by-region")
-def lesson_report_by_region():
-    """Always the full region breakdown (ignores region/store/position
-    filters) — an at-a-glance table across every region regardless of
-    what's currently selected."""
-    lesson_report_id = request.args.get("lessonReportId")
-    if not lesson_report_id:
-        return jsonify({"error": "lessonReportId обов'язковий"}), 400
-    conn = db.get_db()
-    rows = conn.execute(
-        "SELECT region, AVG(test) AS test, AVG(material) AS material, COUNT(*) AS total "
-        "FROM lesson_report_details WHERE lesson_report_id=? AND region != '' "
-        "GROUP BY region ORDER BY test DESC",
-        (lesson_report_id,),
-    ).fetchall()
-    conn.close()
-    return jsonify({"regions": [{
-        "region": r["region"],
-        "test": round(r["test"], 1) if r["test"] is not None else None,
-        "material": round(r["material"], 1) if r["material"] is not None else None,
-        "total": r["total"],
-    } for r in rows]})
-
-
-@app.get("/api/lesson-report-people")
-def lesson_report_people():
-    if not request.args.get("lessonReportId"):
-        return jsonify({"error": "lessonReportId обов'язковий"}), 400
-    where, params = _lesson_report_where(request.args)
-    search = request.args.get("search")
-    if search:
-        where += " AND name LIKE ?"
-        params = params + [f"%{search}%"]
-    conn = db.get_db()
-    rows = conn.execute(
-        f"SELECT region, store, position, name, material, test, test_date "
-        f"FROM lesson_report_details WHERE {where} ORDER BY test ASC, material ASC",
-        params,
-    ).fetchall()
-    conn.close()
-    return jsonify({"people": [{
-        "region": r["region"], "store": r["store"], "position": r["position"], "name": r["name"],
-        "material": r["material"], "test": r["test"], "testDate": r["test_date"],
-    } for r in rows]})
-
-
-@app.get("/api/lesson-report-raw")
-def lesson_report_raw():
-    """All rows for one lesson, unfiltered — used only by the client-side
-    HTML export, which bakes them into the downloaded file so filtering
-    keeps working with zero server round trips once it's out of the
-    browser."""
-    lesson_report_id = request.args.get("lessonReportId")
-    if not lesson_report_id:
-        return jsonify({"error": "lessonReportId обов'язковий"}), 400
-    conn = db.get_db()
-    rows = conn.execute(
-        "SELECT region, store, position, name, material, test, test_date "
-        "FROM lesson_report_details WHERE lesson_report_id=?",
-        (lesson_report_id,),
-    ).fetchall()
-    conn.close()
-    return jsonify({"rows": [{
-        "region": r["region"], "store": r["store"], "position": r["position"], "name": r["name"],
-        "material": r["material"], "test": r["test"], "testDate": r["test_date"],
-    } for r in rows]})
 
 
 # ---------- "Аналіз категорій" — per-position attestation/categorization ----------

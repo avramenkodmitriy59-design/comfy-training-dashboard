@@ -47,8 +47,6 @@ const state = {
   details: { rows: [], total: 0, shown: 0 },
   charts: {},
   loading: false,
-  directorReport: { year: null, quarter: null, region: '', store: '', periods: [] },
-  lessonReport: { lessons: [], lessonReportId: null, region: '', store: '', position: '', search: '' },
   categoryAnalysis: { reports: [], categoryReportId: null, region: '', withApprovals: false, criteriaExpanded: false },
 };
 
@@ -531,114 +529,6 @@ async function readAepRosterWorkbookRows(file) {
   return extractAepRosterRows(sheetRows);
 }
 
-// "Звіт для РК" source — "Деталізація" sheet: one row per topic per
-// director per quarter (Період | Тема | begin | end | Тест | Регіон |
-// Магазин | Посада | Співробітник | Тип навчання). year/quarter are
-// resolved from `begin` client-side, same as AEP — the sheet's own
-// "Період" text column (Q1/Q2/Q3) is just a label, not reparsed.
-function stripDirectorTopicPrefix(topic) {
-  // "6. 📅 Управління кредитом (Керівники)" -> "Управління кредитом (Керівники)"
-  return String(topic).replace(/^\s*\d+\.\s*/, '').replace(/^\s*📅\s*/u, '').trim();
-}
-
-function extractDirectorReportRows(sheetRows) {
-  if (!sheetRows || sheetRows.length < 2) return [];
-  const cols = (sheetRows[0] || []).map((c) => String(c || '').trim());
-  const idx = {
-    topic: cols.indexOf('Тема'),
-    begin: cols.indexOf('begin'),
-    score: cols.indexOf('Тест'),
-    region: cols.indexOf('Регіон'),
-    store: cols.indexOf('Магазин'),
-    position: cols.indexOf('Посада'),
-    name: cols.indexOf('Співробітник'),
-    type: cols.indexOf('Тип навчання'),
-  };
-  if (idx.topic === -1 || idx.begin === -1 || idx.score === -1 || idx.type === -1) {
-    throw new Error('Не знайдено потрібні колонки на аркуші «Деталізація» (Тема, begin, Тест, Тип навчання)');
-  }
-  const rows = [];
-  for (let i = 1; i < sheetRows.length; i++) {
-    const row = sheetRows[i];
-    if (!row || !row[idx.topic]) continue;
-    const d = parseAepDate(row[idx.begin]);
-    if (!d) continue;
-    rows.push({
-      topic: stripDirectorTopicPrefix(row[idx.topic]),
-      trainingType: String(row[idx.type] || '').trim(),
-      region: String(row[idx.region] || '').trim(),
-      store: String(row[idx.store] || '').trim(),
-      position: String(row[idx.position] || '').trim(),
-      name: String(row[idx.name] || '').trim(),
-      score: parseNum(row[idx.score]),
-      year: d.getFullYear(),
-      quarter: aepQuarterOf(d),
-    });
-  }
-  return rows;
-}
-
-async function readDirectorReportWorkbookRows(file) {
-  const buf = await file.arrayBuffer();
-  const wb = XLSX.read(buf, { type: 'array', cellDates: true });
-  const sheet = findSheet(wb, 'Деталізація') || wb.Sheets[wb.SheetNames[0]];
-  const sheetRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: true });
-  return extractDirectorReportRows(sheetRows);
-}
-
-// "Звіт по заняттю #1732: Прийом товару від постачальника" — a per-person
-// result list for ONE specific training session. Title row carries the
-// lesson number + name; that number is the upsert key (re-uploading the
-// same lesson replaces it).
-function extractLessonReportRows(sheetRows) {
-  if (!sheetRows || sheetRows.length < 3) throw new Error('Файл порожній або має неочікувану структуру');
-  const titleRaw = String(sheetRows[0]?.[0] || '');
-  const m = /#(\d+)\s*:\s*(.+)/.exec(titleRaw);
-  if (!m) throw new Error('Не вдалося розпізнати заголовок «Звіт по заняттю #N: ...» у першому рядку файлу');
-  const lessonKey = m[1];
-  const title = m[2].trim();
-
-  let headerIdx = -1, cols = null;
-  for (let i = 0; i < sheetRows.length; i++) {
-    const row = sheetRows[i];
-    if (!row || !row.length) continue;
-    const asStr = row.map((c) => String(c || '').trim());
-    if (asStr.includes('ПІБ') && asStr.includes('Тест')) { headerIdx = i; cols = asStr; break; }
-  }
-  if (headerIdx === -1) throw new Error('Не знайдено заголовок таблиці (очікувались колонки «ПІБ», «Тест»)');
-  const idx = {
-    region: cols.indexOf('Регіон'), store: cols.indexOf('Магазин'), position: cols.indexOf('Посада'),
-    tabNumber: cols.indexOf('Таб. номер'), name: cols.indexOf('ПІБ'),
-    material: cols.indexOf('Матеріал'), test: cols.indexOf('Тест'),
-    testDate: cols.indexOf('Дата проходження тесту'),
-  };
-  const rows = [];
-  for (let i = headerIdx + 1; i < sheetRows.length; i++) {
-    const row = sheetRows[i];
-    if (!row || !row[idx.name]) continue;
-    const d = idx.testDate > -1 ? parseAepDate(row[idx.testDate]) : null;
-    rows.push({
-      region: String(row[idx.region] || '').trim(),
-      store: String(row[idx.store] || '').trim(),
-      position: String(row[idx.position] || '').trim(),
-      tabNumber: String(row[idx.tabNumber] || '').trim(),
-      name: String(row[idx.name] || '').trim(),
-      material: parsePercent(row[idx.material]),
-      test: parsePercent(row[idx.test]),
-      testDate: d ? d.toLocaleDateString('uk-UA') : '',
-    });
-  }
-  return { lessonKey, title, rows };
-}
-
-async function readLessonReportWorkbookRows(file) {
-  const buf = await file.arrayBuffer();
-  const wb = XLSX.read(buf, { type: 'array', cellDates: true });
-  const sheet = wb.Sheets[wb.SheetNames[0]];
-  const sheetRows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: true });
-  return extractLessonReportRows(sheetRows);
-}
-
 // "Аттестация 2026 квартал 3 Комірники" — a per-position quarterly
 // categorization/attestation file. Title row carries year/quarter/
 // position; the data rows carry the raw metrics the category (1 = meets
@@ -765,31 +655,115 @@ function showApp() {
   document.getElementById('app').hidden = false;
 }
 
+// roles: admin — everything; hr — «Все навчання», «Атестація», «Стажери»,
+// «Кадровий резерв» (read) + work with potentials. The server enforces the
+// same split; hiding here only keeps the page tidy.
+const HR_TABS = ['overall', 'attestation', 'trainees', 'reserve'];
+const ADMIN_ONLY_BUTTONS = ['btn-category-analysis', 'btn-classify', 'btn-feed-sync', 'btn-upload'];
+function applyRole(data) {
+  state.role = data.role || 'admin';
+  state.user = data.user || null;
+  const hr = state.role === 'hr';
+  // KPI — only in the owner's account for now (the server checks it too)
+  const tabAllowed = (t) => (t === 'kpi' ? !!data.accessOwner : !hr || HR_TABS.includes(t));
+  document.querySelectorAll('.tabs .tab-btn[data-tab]').forEach((b) => { b.hidden = !tabAllowed(b.dataset.tab); });
+  ADMIN_ONLY_BUTTONS.forEach((id) => { const b = document.getElementById(id); if (b) b.hidden = hr; });
+  document.getElementById('btn-access').hidden = !data.accessOwner; // only the owner sets up access
+  const u = state.user;
+  document.getElementById('user-label').textContent = u ? `${u.short || u.fio || u.login}${hr ? ' · Регіональна команда' : ''}` : 'адмін';
+  if (!tabAllowed(state.tab)) {
+    state.tab = 'overall';
+    document.querySelectorAll('.tabs .tab-btn[data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === 'overall'));
+  }
+}
+
 async function checkSession() {
   const data = await api('/api/session');
   if (data.authenticated) {
+    applyRole(data);
     showApp();
     await bootstrap();
+    watchFeedAuto();
   } else {
     showLogin();
   }
 }
 
+let loginByPassword = false; // the spare admin way in (site password)
+function toggleLoginMode() {
+  loginByPassword = !loginByPassword;
+  document.getElementById('login-user').hidden = loginByPassword;
+  document.getElementById('login-password').placeholder = loginByPassword ? 'Пароль сайту' : 'Пароль Feed';
+  document.getElementById('login-subtitle').textContent = loginByPassword ? 'Запасний вхід для адміністратора' : 'Увійдіть з логіном і паролем Feed';
+  document.getElementById('login-mode').textContent = loginByPassword ? 'Увійти через Feed' : 'Вхід адміністратора за паролем сайту';
+  document.getElementById('login-error').textContent = '';
+}
+
 async function doLogin() {
+  const user = document.getElementById('login-user');
   const input = document.getElementById('login-password');
+  const btn = document.getElementById('login-submit');
   const errorEl = document.getElementById('login-error');
   errorEl.textContent = '';
+  if (!loginByPassword && !user.value.trim()) { errorEl.textContent = 'Введіть логін Feed'; return; }
+  btn.disabled = true; btn.textContent = loginByPassword ? 'Перевіряю…' : 'Перевіряю у Feed…';
   try {
-    await api('/api/login', { method: 'POST', body: JSON.stringify({ password: input.value }) });
+    // the Feed password goes to the dashboard server and on to Feed only
+    const res = await fetch('api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(loginByPassword ? { password: input.value } : { login: user.value.trim(), password: input.value }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error || 'Не вдалося увійти');
     input.value = '';
+    applyRole(await api('/api/session'));
     showApp();
     await bootstrap();
+    watchFeedAuto();
   } catch (e) {
-    errorEl.textContent = 'Невірний пароль';
+    errorEl.textContent = e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Увійти';
+  }
+}
+
+// Sync on login (see maybe_start_feed_auto): the server refreshes the
+// current quarter from Feed in the background; show that it's running and
+// reload the open tab once it's done.
+let feedAutoTimer = null;
+async function watchFeedAuto(wasRunning = false) {
+  clearTimeout(feedAutoTimer);
+  const el = document.getElementById('feed-auto-note');
+  let st;
+  try { st = await api('/api/feed-auto'); } catch { el.hidden = true; return; }
+  el.classList.toggle('running', !!st.running);
+  if (st.running) {
+    el.textContent = 'Оновлюю дані з Feed…';
+    el.title = 'Звіти за поточний квартал оновлюються у фоні, можна працювати';
+    el.hidden = false;
+    feedAutoTimer = setTimeout(() => watchFeedAuto(true), 15000);
+    return;
+  }
+  if (st.lastAt) {
+    const d = new Date(st.lastAt);
+    const today = d.toDateString() === new Date().toDateString();
+    el.textContent = `Feed: ${today ? '' : d.toLocaleDateString('uk-UA', { day: '2-digit', month: '2-digit' }) + ' '}${d.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' })}`;
+    el.title = 'Коли дані востаннє оновлювались з Feed автоматично';
+    el.hidden = false;
+  } else {
+    el.hidden = true;
+  }
+  if (wasRunning) {
+    await loadPositionsConfig();
+    await loadStreams();
+    renderPositionSwitch();
+    state.selectedPeriodId = null;
+    if (state.trainees) state.trainees.data = null;
+    await refreshAll();
+    showToast(st.lastSaved ? 'Дані з Feed оновлено' : 'Не вдалося оновити дані з Feed, показано попередні');
   }
 }
 
 async function doLogout() {
+  clearTimeout(feedAutoTimer);
   await api('/api/logout', { method: 'POST' });
   showLogin();
 }
@@ -815,8 +789,6 @@ async function loadStreams() {
   }
   state.aepAvailable = !!data.aepAvailable;
   state.aepLastUpdated = data.aepLastUpdated || null;
-  const drData = await api('/api/director-report-last-updated');
-  state.directorReportLastUpdated = drData.lastUpdated || null;
   if (state.selectedProjectKind === 'aep' && !state.aepAvailable) {
     state.selectedProjectKind = 'project';
   }
@@ -983,8 +955,25 @@ function reconcileFiltersWithOptions() {
 async function refreshSummary() {
   const { streamType, streamKey } = currentStream();
   const periodId = resolveSelectedPeriod()?.id || '';
-  const data = await api(`/api/summary?${qs({ streamType, streamKey, periodId, ...filterParams() })}`);
+  const fp = filterParams();
+  const data = await api(`/api/summary?${qs({ streamType, streamKey, periodId, ...fp })}`);
   state.summary = data;
+  // a region (or store) is picked: the «за регіонами» charts still show every
+  // region for comparison (same other filters), the picked one highlighted
+  state.regionCompare = null;
+  if (!isAepStream() && (fp.region || fp.store)) {
+    const all = await api(`/api/summary?${qs({ streamType, streamKey, periodId, ...fp, region: '', store: '' })}`);
+    const byStore = state._filterOptions && state._filterOptions.storesByRegion;
+    const hl = fp.region || (byStore ? Object.keys(byStore).find((r) => (byStore[r] || []).includes(fp.store)) : '') || '';
+    state.regionCompare = { byRegion: all.byRegion || {}, highlight: hl };
+    // stores of the region: when a store is picked too, all of the region's
+    // stores (the picked one highlighted)
+    state.storeCompare = !hl ? null : fp.store
+      ? { region: hl, byStore: (await api(`/api/summary?${qs({ streamType, streamKey, periodId, ...fp, region: hl, store: '' })}`)).byStore || {}, highlight: fp.store }
+      : { region: hl, byStore: data.byStore || {}, highlight: '' };
+  } else {
+    state.storeCompare = null;
+  }
   if (isAepStream()) {
     state.aepGoal = data.aepGoal || 100;
     renderKPIs();
@@ -1002,6 +991,7 @@ async function refreshSummary() {
     renderRegionEngagementChart();
   }
   renderDistributionChart();
+  renderStoreCharts();
   renderStoresTable();
   await refreshTopicsTable();
 }
@@ -1144,6 +1134,10 @@ function dashboardShellHtml() {
       <div class="card"><h3>${t5}</h3><div class="chart-wrap" id="chart-distribution-wrap"><canvas id="chart-distribution" height="220"></canvas></div></div>
       <div class="card"><h3>Динаміка по періодах</h3><div class="chart-wrap"><canvas id="chart-trend" height="220"></canvas></div></div>
     </div>`}
+    <div class="grid-2" id="store-charts" hidden>
+      <div class="card" id="store-progress-card"><h3 id="store-progress-title"></h3><div class="chart-wrap" id="store-progress-wrap"><canvas id="chart-store"></canvas></div></div>
+      <div class="card" id="store-score-card"><h3 id="store-score-title"></h3><div class="chart-wrap" id="store-score-wrap"><canvas id="chart-store-score"></canvas></div></div>
+    </div>
     ${p || hideProgress ? '' : `
     <div class="card" id="topics-card" hidden>
       <h3>Результати по темах</h3>
@@ -1158,7 +1152,7 @@ function dashboardShellHtml() {
     <div class="card" id="employees-card">
       <div class="table-toolbar">
         <h3 class="mt-0">Співробітники</h3>
-        <input type="text" class="search-input" id="employee-search" placeholder="Пошук за ПІБ…">
+        <div class="filter-field" style="min-width:260px;"><label for="employee-search">ПІБ працівника</label><input type="text" class="search-input" id="employee-search" placeholder="Пошук за ПІБ…"></div>
       </div>
       <div class="table-scroll"><table class="data-table" id="employees-table"></table></div>
       <div class="table-note" id="employees-note"></div>
@@ -1231,7 +1225,7 @@ function renderFiltersBar() {
       <select id="f-position"><option value="">${positionAllLabel}</option>${opts.positions.map((p) => `<option value="${escapeHtml(p)}" ${p === f.position ? 'selected' : ''}>${escapeHtml(p)}</option>`).join('')}</select>
     </div>`}
     ${aep || isProjectStream() || !(opts.topics || []).length ? '' : `
-    <div class="filter-field">
+    <div class="filter-field filter-wide">
       <label>Тема</label>
       <select id="f-topic"><option value="">Усі теми</option>${opts.topics.map((t) => `<option value="${escapeHtml(t)}" ${t === f.topic ? 'selected' : ''}>${escapeHtml(t)}</option>`).join('')}</select>
     </div>`}
@@ -1417,7 +1411,7 @@ function barChartColors(values) {
   return values.map((v) => STATUS_COLORS[statusBucket(v)] || '#c7cad1');
 }
 
-function renderBucketBarChart(chartKey, canvasId, bucket, sumField, countField = 'count') {
+function renderBucketBarChart(chartKey, canvasId, bucket, sumField, countField = 'count', highlight = '') {
   destroyChart(chartKey);
   const ctx = document.getElementById(canvasId);
   if (!ctx) return; // e.g. the "за посадами" card is hidden for this project
@@ -1429,9 +1423,9 @@ function renderBucketBarChart(chartKey, canvasId, bucket, sumField, countField =
     type: 'bar',
     data: {
       labels: entries.map((e) => e[0]),
-      datasets: [{ data: entries.map((e) => Math.round(e[1] * 10) / 10), backgroundColor: barChartColors(entries.map((e) => e[1])), borderRadius: 6 }],
+      datasets: [{ data: entries.map((e) => Math.round(e[1] * 10) / 10), backgroundColor: highlightColors(entries, highlight), borderRadius: 6 }],
     },
-    options: chartBarOptions(),
+    options: chartBarOptions(entries.map((e) => e[0]), highlight),
   });
 }
 
@@ -1440,9 +1434,31 @@ function renderPositionChart() {
   renderBucketBarChart('position', 'chart-position', state.summary.byPosition, field);
 }
 
+// «за магазинами регіону»: shown only when a region (or a store) is picked
+function renderStoreCharts() {
+  const box = document.getElementById('store-charts');
+  if (!box) return;
+  destroyChart('store'); destroyChart('storeScore');
+  const sc = state.storeCompare;
+  box.hidden = !sc;
+  if (!sc) return;
+  const project = isProjectStream(), scoreOnly = !project && isProdavetsAttestation();
+  const n = Object.keys(sc.byStore).length;
+  const h = `${Math.max(220, n * 26 + 50)}px`;
+  ['store-progress-wrap', 'store-score-wrap'].forEach((id) => { document.getElementById(id).style.height = h; });
+  document.getElementById('store-progress-title').textContent = `${project ? 'Середній результат тестів' : 'Прогрес'} за магазинами · ${sc.region}`;
+  document.getElementById('store-score-title').textContent = `${project ? 'Середній результат ДЗ' : 'Середня оцінка'} за магазинами · ${sc.region}`;
+  document.getElementById('store-progress-card').hidden = scoreOnly;
+  if (!scoreOnly) renderBucketBarChart('store', 'chart-store', sc.byStore, project ? 'testsSum' : 'progressSum', 'count', sc.highlight);
+  renderBucketBarChart('storeScore', 'chart-store-score', sc.byStore, project ? 'homeworkPercentSum' : 'scoreSum', project ? 'count' : 'scoreCount', sc.highlight);
+}
+
+const regionBucket = () => (state.regionCompare ? state.regionCompare.byRegion : state.summary.byRegion);
+const regionHighlight = () => (state.regionCompare ? state.regionCompare.highlight : '');
+
 function renderRegionChart() {
   const field = isProjectStream() ? 'testsSum' : 'progressSum';
-  renderBucketBarChart('region', 'chart-region', state.summary.byRegion, field);
+  renderBucketBarChart('region', 'chart-region', regionBucket(), field, 'count', regionHighlight());
 }
 
 function renderPositionScoreChart() {
@@ -1454,12 +1470,12 @@ function renderPositionScoreChart() {
 function renderRegionScoreChart() {
   const field = isProjectStream() ? 'homeworkPercentSum' : 'scoreSum';
   const countField = isProjectStream() ? 'count' : 'scoreCount';
-  renderBucketBarChart('regionScore', 'chart-region-score', state.summary.byRegion, field, countField);
+  renderBucketBarChart('regionScore', 'chart-region-score', regionBucket(), field, countField, regionHighlight());
 }
 
 // Engagement (% actually participating vs. enrolled) is a ratio of two
 // counts, not a sum-of-percentages average, so it gets its own chart function.
-function renderEngagementChart(chartKey, canvasId, bucket) {
+function renderEngagementChart(chartKey, canvasId, bucket, highlight = '') {
   destroyChart(chartKey);
   const ctx = document.getElementById(canvasId);
   if (!ctx) return; // e.g. the "за посадами" card is hidden for this project
@@ -1471,9 +1487,9 @@ function renderEngagementChart(chartKey, canvasId, bucket) {
     type: 'bar',
     data: {
       labels: entries.map((e) => e[0]),
-      datasets: [{ data: entries.map((e) => Math.round(e[1] * 10) / 10), backgroundColor: barChartColors(entries.map((e) => e[1])), borderRadius: 6 }],
+      datasets: [{ data: entries.map((e) => Math.round(e[1] * 10) / 10), backgroundColor: highlightColors(entries, highlight), borderRadius: 6 }],
     },
-    options: chartBarOptions(),
+    options: chartBarOptions(entries.map((e) => e[0]), highlight),
   });
 }
 
@@ -1482,16 +1498,29 @@ function renderPositionEngagementChart() {
 }
 
 function renderRegionEngagementChart() {
-  renderEngagementChart('regionEngagement', 'chart-region-engagement', state.summary.byRegion);
+  renderEngagementChart('regionEngagement', 'chart-region-engagement', regionBucket(), regionHighlight());
 }
 
-function chartBarOptions() {
+// the picked region stays in full colour with a bold ▶ label; the rest fade
+function highlightColors(entries, highlight) {
+  const colors = barChartColors(entries.map((e) => e[1]));
+  return highlight ? colors.map((c, i) => (entries[i][0] === highlight ? c : `${c}40`)) : colors;
+}
+
+function chartBarOptions(labels = [], highlight = '') {
+  const y = highlight ? {
+    ticks: {
+      callback: (v, i) => (labels[i] === highlight ? `▶ ${labels[i]}` : labels[i]),
+      font: (c) => ({ weight: labels[c.index] === highlight ? 'bold' : 'normal' }),
+      color: (c) => (labels[c.index] === highlight ? '#1f2228' : '#9a9da5'),
+    },
+  } : {};
   return {
     indexAxis: 'y',
     responsive: true,
     maintainAspectRatio: false,
     plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c) => `${c.parsed.x}%` } } },
-    scales: { x: { min: 0, max: 100, ticks: { callback: (v) => `${v}%` } } },
+    scales: { x: { min: 0, max: 100, ticks: { callback: (v) => `${v}%` } }, y },
   };
 }
 
@@ -2881,12 +2910,12 @@ async function renderTraineesView() {
     <div class="card">
       <div class="table-toolbar">
         <h3 class="mt-0">Стажери</h3>
-        <div style="display:flex; gap:8px; flex-wrap:wrap;">
-          <select id="tr-status">
+        <div class="filters-inline" style="margin:0;">
+          <div class="filter-field"><label for="tr-status">Результат</label><select id="tr-status">
             <option value="">Усі результати</option>
             ${Object.entries(TRAINEE_STATUS).map(([k, v]) => `<option value="${k}" ${k === tr.status ? 'selected' : ''}>${v.label}</option>`).join('')}
-          </select>
-          <input type="text" class="search-input" id="tr-search" placeholder="Пошук за ПІБ або наставником…" value="${escapeHtml(tr.search)}">
+          </select></div>
+          <div class="filter-field wide"><label for="tr-search">ПІБ або наставник</label><input type="text" class="search-input" id="tr-search" placeholder="Пошук за ПІБ або наставником…" value="${escapeHtml(tr.search)}"></div>
         </div>
       </div>
       <div class="table-scroll"><table class="data-table" id="tr-list"></table></div>
@@ -3000,7 +3029,7 @@ function renderTraineeList(scoped) {
 // The tab itself lives in static/js/reserve.js (LeaderHub.mount — tabs
 // Кадровий резерв / Leader Hub 1.0 / 2.0, built on the team's prototype);
 // here: loading /api/reserve and the editing actions it calls back into.
-const LH_PROGRAMS = { LH1: 'LH 1.0', LH2: 'LH 2.0' };
+const LH_PROGRAMS = { LH1: 'LH 1.0', LH2: 'LH 2.0', TZ: 'LH БЕК' };
 
 async function renderReserveView() {
   const area = document.getElementById('content-area');
@@ -3020,9 +3049,12 @@ async function renderReserveView() {
   }
   const note = () => {
     const ups = rs.data.uploads;
+    // the latest of the two sources (participants file, «Історія працівника»); details on hover
+    const latest = ['lh_participants', 'employee_history'].map((k) => ups[k] && ups[k].uploadedAt).filter(Boolean).sort().pop();
     const up = (k) => (ups[k] ? `${fmtNum(ups[k].rows)} · ${fmtUploadedAt(ups[k].uploadedAt)}` : 'не завантажено');
+    const title = `Учасники: ${up('lh_participants')}\nІсторія працівника (BI): ${up('employee_history')}`;
     const unmatched = Object.values(rs.data.people).filter((p) => !p.matchedBy).length;
-    return `Учасники: ${up('lh_participants')} · Історія працівника (BI): ${up('employee_history')}${unmatched ? ` · <span class="error-text">не знайдено в історії: ${unmatched}</span>` : ''}`;
+    return `<span title="${escapeHtml(title)}">${latest ? `Востаннє оновлено: ${fmtUploadedAt(latest)}` : 'Дані ще не завантажено'}</span>${unmatched && state.role !== 'hr' ? ` · <span class="error-text">не знайдено в історії: ${unmatched}</span>` : ''}`;
   };
   area.innerHTML = `<div class="last-updated-note" id="lh-note">${note()}</div><div id="lh-mount"></div>`;
   // after an edit: fetch fresh numbers and re-render in place (no spinner,
@@ -3034,6 +3066,7 @@ async function renderReserveView() {
     LeaderHub.update(rs.data);
   };
   LeaderHub.mount(document.getElementById('lh-mount'), rs.data, {
+    readOnly: state.role === 'hr', // HR: only the potentials can be changed
     settings: (prog) => openLhSettingsModal(prog, reload),
     newStream: (prog) => openNewStreamModal(prog),
     addParticipant: (prog, year) => openAddParticipantModal(prog, year),
@@ -3047,6 +3080,20 @@ async function renderReserveView() {
       try {
         await api('/api/reserve-status', { method: 'PUT', body: JSON.stringify({ pid: entry.pid, program: entry.prog, status, note }) });
         showToast(status ? 'Статус резерву збережено' : 'Повернуто автостатус');
+        await reload();
+      } catch (err) { showToast(err.message, true); }
+    },
+    setAdminNote: async (part, note) => {
+      try {
+        await api('/api/admin-note', { method: 'PUT', body: JSON.stringify({ pid: part.pid, program: part.prog, year: part.year, note }) });
+        showToast(note ? 'Коментар збережено' : 'Коментар видалено');
+        await reload();
+      } catch (err) { showToast(err.message, true); }
+    },
+    setReserveNote: async (entry, note) => {
+      try {
+        await api('/api/reserve-note', { method: 'PUT', body: JSON.stringify({ pid: entry.pid, program: entry.prog, note }) });
+        showToast(note ? 'Коментар збережено' : 'Коментар видалено');
         await reload();
       } catch (err) { showToast(err.message, true); }
     },
@@ -3084,7 +3131,7 @@ function openLhSettingsModal(program, reload, sel = {}) {
         <button class="modal-close" id="ls-close">✕</button>
         <h2>⚙️ Налаштування Leader Hub</h2>
         <div class="field-group"><label>1. Проєкт</label>
-          <div class="tabs small" id="ls-prog">${progBtn('LH1', 'Leader Hub 1.0 · резерв на Заступника')}${progBtn('LH2', 'Leader Hub 2.0 · резерв на Директора')}</div></div>
+          <div class="tabs small" id="ls-prog">${progBtn('LH1', 'Leader Hub 1.0 · резерв на Заступника')}${progBtn('LH2', 'Leader Hub 2.0 · резерв на Директора')}${progBtn('TZ', 'Leader Hub БЕК · резерв на Товарознавця')}</div></div>
         <div class="field-group"><label>2. Потоки й період проведення</label>
           <p class="modal-subtitle" style="margin:0 0 8px;">Від дати старту рахуються призначення й «Швидкість виходу на посаду». Оберіть потік, щоб керувати учасниками.</p>
           <div class="table-scroll"><table class="data-table">
@@ -3166,14 +3213,19 @@ function openNewStreamModal(program = 'LH1') {
       <h2>Новий потік Leader Hub</h2>
       <div style="display:flex; gap:16px; flex-wrap:wrap;">
         <div class="field-group"><label>Програма</label>
-          <select id="ns-program"><option value="LH1" ${program === 'LH1' ? 'selected' : ''}>LH 1.0 — резерв на заступника</option><option value="LH2" ${program === 'LH2' ? 'selected' : ''}>LH 2.0 — резерв на директора</option></select></div>
+          <select id="ns-program"><option value="LH1" ${program === 'LH1' ? 'selected' : ''}>LH 1.0 — резерв на заступника</option><option value="LH2" ${program === 'LH2' ? 'selected' : ''}>LH 2.0 — резерв на директора</option><option value="TZ" ${program === 'TZ' ? 'selected' : ''}>LH БЕК — резерв на товарознавця</option></select></div>
         <div class="field-group"><label>Рік потоку</label><input type="number" id="ns-year" value="${new Date().getFullYear()}" style="width:110px;"></div>
         <div class="field-group"><label>Дати (необов'язково)</label>
           <div style="display:flex; gap:8px;"><input type="date" id="ns-start"><input type="date" id="ns-end"></div></div>
       </div>
       <div class="field-group"><label>Учасники <span class="muted" id="ns-count"></span></label>
         <div id="ns-selected" class="ns-selected"></div>
+        <div class="tabs small" role="group" id="ns-mode" style="margin-bottom:8px;">
+          <button type="button" class="tab-btn active" data-m="search" aria-pressed="true">🔍 Пошук</button>
+          <button type="button" class="tab-btn" data-m="pot" aria-pressed="false">🌱 Додати з потенційних <span id="ns-pot-n"></span></button>
+        </div>
         <input type="text" class="search-input" id="ns-q" placeholder="Пошук в «Історії працівника»: прізвище або таб. номер…" style="width:100%;">
+        <div id="ns-pot-tools" class="pp-find" hidden><div class="filter-field"><label for="ns-pot-reg">Регіон</label><select id="ns-pot-reg"></select></div><button type="button" class="btn btn-secondary btn-sm" id="ns-pot-all">Обрати всіх у списку</button></div>
         <div class="table-scroll" style="margin-top:10px; max-height:300px;"><table class="data-table" id="ns-results"></table></div>
       </div>
       <div id="ns-error" class="error-text"></div>
@@ -3181,7 +3233,27 @@ function openNewStreamModal(program = 'LH1') {
     </div></div>`;
   const $id = (id) => document.getElementById(id);
   const picked = new Map(); // tab -> employee
-  let found = [];
+  let found = [], mode = 'search', searched = [];
+  // «Додати з потенційних»: people marked as potentials toward this programme
+  const potList = () => LeaderHub.potentials($id('ns-program').value);
+  const showPot = () => {
+    const all = potList(), reg = $id('ns-pot-reg').value;
+    found = reg ? all.filter((e) => e.region === reg) : all;
+    renderFound();
+  };
+  const fillPotRegions = () => {
+    const all = potList(), cur = $id('ns-pot-reg').value;
+    $id('ns-pot-n').textContent = `· ${all.length}`;
+    const regs = [...new Set(all.map((e) => e.region).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'uk'));
+    $id('ns-pot-reg').innerHTML = `<option value="">Усі регіони · ${all.length}</option>` + regs.map((r) => `<option value="${escapeHtml(r)}" ${r === cur ? 'selected' : ''}>${escapeHtml(r)} · ${all.filter((e) => e.region === r).length}</option>`).join('');
+  };
+  const setMode = (m) => {
+    mode = m;
+    $id('ns-mode').querySelectorAll('.tab-btn').forEach((b) => { const on = b.dataset.m === m; b.classList.toggle('active', on); b.setAttribute('aria-pressed', String(on)); });
+    $id('ns-q').hidden = m !== 'search';
+    $id('ns-pot-tools').hidden = m !== 'pot';
+    if (m === 'pot') { fillPotRegions(); showPot(); } else { found = searched; renderFound(); }
+  };
   const empLine = (e) => `${escapeHtml(e.position)}<div class="muted">${escapeHtml(e.store || '')}${e.region ? ` · ${escapeHtml(e.region)}` : ''}</div>`;
   const renderPicked = () => {
     $id('ns-count').textContent = picked.size ? `· обрано ${picked.size}` : '';
@@ -3198,9 +3270,9 @@ function openNewStreamModal(program = 'LH1') {
       const on = picked.has(e.tab);
       return `<tr><td>${escapeHtml(e.name)}<div class="muted">таб. ${escapeHtml(e.tab)}</div></td>
         <td>${empLine(e)}</td>
-        <td>${e.working ? '' : '<span class="muted">не працює</span>'}</td>
+        <td>${e.why ? `<span class="muted">${escapeHtml(e.why)}</span>` : e.working ? '' : '<span class="muted">не працює</span>'}</td>
         <td><button class="btn ${on ? 'btn-primary' : 'btn-secondary'} btn-sm ns-pick" data-tab="${escapeHtml(e.tab)}">${on ? 'Обрано ✓' : 'Обрати'}</button></td></tr>`;
-    }).join('') || (q.length >= 2 ? '<tr><td class="muted">Нікого не знайдено</td></tr>' : '');
+    }).join('') || (mode === 'pot' ? '<tr><td class="muted">Потенційних на цю програму немає</td></tr>' : q.length >= 2 ? '<tr><td class="muted">Нікого не знайдено</td></tr>' : '');
     t.querySelectorAll('.ns-pick').forEach((b) => b.addEventListener('click', () => {
       const e = found.find((x) => x.tab === b.dataset.tab);
       if (picked.has(e.tab)) picked.delete(e.tab); else picked.set(e.tab, e);
@@ -3211,9 +3283,14 @@ function openNewStreamModal(program = 'LH1') {
   $id('ns-cancel').onclick = closeModal;
   $id('ns-q').addEventListener('input', debounce(async () => {
     const q = $id('ns-q').value.trim();
-    found = q.length >= 2 ? (await api(`/api/employees/search?${qs({ q })}`)).employees : [];
-    renderFound();
+    searched = q.length >= 2 ? (await api(`/api/employees/search?${qs({ q })}`)).employees : [];
+    if (mode === 'search') { found = searched; renderFound(); }
   }, 300));
+  $id('ns-mode').addEventListener('click', (ev) => { const b = ev.target.closest('.tab-btn'); if (b) setMode(b.dataset.m); });
+  $id('ns-pot-reg').addEventListener('change', showPot);
+  $id('ns-pot-all').addEventListener('click', () => { found.forEach((e) => picked.set(e.tab, e)); renderPicked(); renderFound(); });
+  $id('ns-program').addEventListener('change', () => { if (mode === 'pot') { fillPotRegions(); showPot(); } else fillPotRegions(); });
+  fillPotRegions();
   renderPicked();
   $id('ns-save').onclick = async () => {
     const program = $id('ns-program').value;
@@ -3241,16 +3318,25 @@ function openNewStreamModal(program = 'LH1') {
 // «Потенційний» — who could be brought into the programme
 function openAddPotentialModal(program, reload) {
   const root = document.getElementById('modal-root');
+  const data = (state.reserve && state.reserve.data) || {};
+  // stores grouped by region, for picking a store's team
+  const byReg = {};
+  (data.stores || []).forEach(([r, st]) => { (byReg[r || '—'] = byReg[r || '—'] || []).push(st); });
+  const storeOpts = Object.keys(byReg).sort((a, b) => a.localeCompare(b, 'uk')).map((r) =>
+    `<optgroup label="${escapeHtml(r)}">${byReg[r].map((st) => `<option value="${escapeHtml(st)}">${escapeHtml(st)}</option>`).join('')}</optgroup>`).join('');
   root.innerHTML = `
     <div class="modal-backdrop" id="pp-backdrop"><div class="modal" style="max-width:680px;">
       <button class="modal-close" id="pp-close">✕</button>
       <h2>Додати потенційного</h2>
-      <p class="modal-subtitle">Кого можна залучити в програму. Пошук серед тих, хто працює, в «Історії працівника».</p>
+      <p class="modal-subtitle">Кого можна залучити в програму. Оберіть магазин, щоб побачити всіх, хто там працює, або знайдіть людину за ПІБ / таб. номером (за «Історією працівника»).</p>
       <div class="field-group"><label>Потенційний на</label>
-        <select id="pp-program"><option value="TZ" ${program === 'TZ' ? 'selected' : ''}>Товарознавця</option><option value="LH1" ${program === 'LH1' ? 'selected' : ''}>Заступника (LH 1.0)</option><option value="LH2" ${program === 'LH2' ? 'selected' : ''}>Директора (LH 2.0)</option></select></div>
-      <div class="field-group"><label>Коментар (необов'язково)</label><input type="text" id="pp-note" style="width:100%;" placeholder="напр., рекомендація регіону"></div>
-      <input type="text" class="search-input" id="pp-q" placeholder="Прізвище або таб. номер…" style="width:100%;">
-      <div class="table-scroll" style="margin-top:10px; max-height:300px;"><table class="data-table" id="pp-results"></table></div>
+        <select id="pp-program"><option value="TZ" ${program === 'TZ' ? 'selected' : ''}>Товарознавця (LH БЕК)</option><option value="LH1" ${program === 'LH1' ? 'selected' : ''}>Заступника (LH 1.0)</option><option value="LH2" ${program === 'LH2' ? 'selected' : ''}>Директора (LH 2.0)</option></select></div>
+      <div class="pp-find">
+        <div class="filter-field"><label for="pp-store">Магазин</label><select id="pp-store"><option value="">Усі магазини</option>${storeOpts}</select></div>
+        <div class="filter-field"><label for="pp-q">ПІБ працівника</label><input type="text" class="search-input" id="pp-q" placeholder="Прізвище або таб. номер…"></div>
+      </div>
+      <div class="muted" id="pp-count" style="margin-top:8px;"></div>
+      <div class="table-scroll" style="margin-top:6px; max-height:340px;"><table class="data-table" id="pp-results"></table></div>
       <div id="pp-error" class="error-text"></div>
       <div class="modal-actions"><button class="btn btn-secondary" id="pp-done">Готово</button></div>
     </div></div>`;
@@ -3259,23 +3345,64 @@ function openAddPotentialModal(program, reload) {
   const done = async () => { closeModal(); if (added) await reload(); };
   $id('pp-close').onclick = done;
   $id('pp-done').onclick = done;
-  $id('pp-q').focus();
-  $id('pp-q').addEventListener('input', debounce(async () => {
-    const q = $id('pp-q').value.trim();
-    const data = q.length >= 2 ? await api(`/api/employees/search?${qs({ q })}`) : { employees: [] };
+  // only these posts are considered toward each post (the server filters the same way)
+  const POT_FROM = { TZ: 'вантажник, комірник, касир, сервіс менеджер, продавець', LH1: 'продавець, ІТ-спеціаліст, товарознавець', LH2: 'заступники, товарознавець' };
+  // ІПР / Сертифікований in a programme are potentials automatically
+  const auto = new Set((data.parts || []).filter((x) => x.status === 'ІПР' || x.status === 'Сертифікований').map((x) => `${x.pid}|${x.prog}`));
+  // marked by hand (this window keeps it in sync: add / remove)
+  const manual = new Set(Object.entries(data.rstatus || {}).filter(([, v]) => v.status === 'Потенційний').map(([k]) => k));
+  const key = (tab) => `${tab}|${$id('pp-program').value}`;
+  const cell = (tab) => (manual.has(key(tab))
+    ? `<span class="pp-added">Додано ✓</span> <button class="btn btn-secondary btn-sm pp-del" data-tab="${escapeHtml(tab)}" title="Прибрати з потенційних">Прибрати</button>`
+    : auto.has(key(tab)) ? '<span class="muted" title="ІПР / Сертифікований у програмі">вже потенційний</span>'
+    : `<button class="btn btn-secondary btn-sm ns-pick" data-tab="${escapeHtml(tab)}">Додати</button>`);
+  const search = async () => {
+    const q = $id('pp-q').value.trim(), store = $id('pp-store').value;
     const t = $id('pp-results');
-    t.innerHTML = data.employees.map((e) => `
-      <tr><td>${escapeHtml(e.name)}<div class="muted">таб. ${escapeHtml(e.tab)}</div></td>
+    if (q.length < 2 && !store) { t.innerHTML = ''; $id('pp-count').textContent = ''; return; }
+    const res = await api(`/api/employees/search?${qs({ q, store, potential: $id('pp-program').value })}`);
+    $id('pp-count').textContent = store ? `${store}: можна залучити ${res.employees.length} (${POT_FROM[$id('pp-program').value]})` : '';
+    t.innerHTML = res.employees.map((e) => `
+      <tr data-name="${escapeHtml(e.name)}"><td>${escapeHtml(e.name)}<div class="muted">таб. ${escapeHtml(e.tab)}</div></td>
       <td>${escapeHtml(e.position)}<div class="muted">${escapeHtml(e.store || '')}${e.region ? ` · ${escapeHtml(e.region)}` : ''}</div></td>
-      <td><button class="btn btn-secondary btn-sm ns-pick" data-tab="${escapeHtml(e.tab)}">Додати</button></td></tr>`).join('')
-      || (q.length >= 2 ? '<tr><td class="muted">Нікого не знайдено</td></tr>' : '');
-    t.querySelectorAll('.ns-pick').forEach((b) => b.addEventListener('click', async () => {
-      try {
-        await api('/api/reserve-status', { method: 'PUT', body: JSON.stringify({ pid: b.dataset.tab, program: $id('pp-program').value, status: 'Потенційний', note: $id('pp-note').value }) });
-        added = true; b.disabled = true; b.textContent = 'Додано ✓';
-      } catch (err) { $id('pp-error').textContent = err.message; }
-    }));
-  }, 300));
+      <td class="pp-act" style="text-align:right; white-space:nowrap;">${cell(e.tab)}</td></tr>`).join('')
+      || '<tr><td class="muted">Нікого не знайдено</td></tr>';
+  };
+  // «Додати» asks for an optional comment in a small window on top
+  const askNote = (name) => new Promise((resolve) => {
+    const box = document.createElement('div');
+    box.className = 'pp-ask-backdrop';
+    box.innerHTML = `<div class="pp-ask" role="dialog" aria-modal="true" aria-label="Додати в потенційні">
+      <h3>Додати в потенційні</h3>
+      <p class="modal-subtitle">${escapeHtml(name)} · на ${escapeHtml($id('pp-program').selectedOptions[0].textContent)}</p>
+      <div class="field-group"><label for="pp-note">Коментар (необов'язково)</label><input type="text" id="pp-note" style="width:100%;" placeholder="напр., рекомендація регіону"></div>
+      <div class="modal-actions"><button class="btn btn-secondary" data-a="no">Скасувати</button><button class="btn btn-primary" data-a="ok">Додати</button></div></div>`;
+    const finish = (v) => { box.remove(); document.removeEventListener('keydown', onKey, true); resolve(v); };
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); finish(null); } else if (e.key === 'Enter') { e.preventDefault(); finish(box.querySelector('#pp-note').value.trim()); } };
+    box.addEventListener('click', (e) => { const a = e.target.dataset.a; if (a === 'ok') finish(box.querySelector('#pp-note').value.trim()); else if (a === 'no' || e.target === box) finish(null); });
+    document.addEventListener('keydown', onKey, true);
+    document.getElementById('modal-root').append(box);
+    box.querySelector('#pp-note').focus();
+  });
+  // add / remove (a slip of the hand can be undone right here)
+  $id('pp-results').addEventListener('click', async (ev) => {
+    const b = ev.target.closest('.ns-pick, .pp-del');
+    if (!b) return;
+    const tab = b.dataset.tab, k = key(tab), add = b.classList.contains('ns-pick');
+    const note = add ? await askNote(b.closest('tr').dataset.name) : '';
+    if (note === null) return;
+    b.disabled = true;
+    try {
+      await api('/api/reserve-status', { method: 'PUT', body: JSON.stringify({ pid: tab, program: $id('pp-program').value, status: add ? 'Потенційний' : '', note, check: add }) });
+      if (add) manual.add(k); else manual.delete(k);
+      added = true; $id('pp-error').textContent = '';
+      b.closest('.pp-act').innerHTML = cell(tab);
+    } catch (err) { $id('pp-error').textContent = err.message; b.disabled = false; }
+  });
+  $id('pp-store').addEventListener('change', search);
+  $id('pp-program').addEventListener('change', search);
+  $id('pp-q').addEventListener('input', debounce(search, 300));
+  $id('pp-store').focus();
 }
 
 function openAddParticipantModal(program, year, onDone) {
@@ -3494,469 +3621,7 @@ function openClassifyModal() {
   };
 }
 
-/* ===================== director report ("Звіт для РК") =====================
-   Separate full-screen view (not one of the three main tabs) — combines
-   per-topic АТТ + "Додаткове навчання" rows (director_report_details,
-   loaded from the "Деталізація" sheet) into one shareable summary: result
-   per type, overall result, per-topic breakdown, and two antitop
-   (worst-engagement) lists. See /api/director-report-* in app.py. */
-
-async function openDirectorReportView() {
-  document.getElementById('app').hidden = true;
-  const view = document.getElementById('director-report-view');
-  view.hidden = false;
-  renderDirectorReportShell();
-  await loadDirectorReportPeriods();
-}
-
-function closeDirectorReportView() {
-  document.getElementById('director-report-view').hidden = true;
-  document.getElementById('app').hidden = false;
-}
-
-function renderDirectorReportShell() {
-  const view = document.getElementById('director-report-view');
-  view.innerHTML = `
-    <div class="top-bar">
-      <div class="brand">
-        <img class="logo" src="static/assets/logo_green.png" alt="COMFY">
-        <div>
-          <div class="brand-title">Звіт для РК</div>
-          <div class="brand-subtitle">АТТ і додаткове навчання директорів</div>
-        </div>
-      </div>
-      <div class="top-actions">
-        <button class="btn btn-primary btn-sm" id="dr-upload">Завантажити файл</button>
-        <button class="btn btn-secondary btn-sm" id="dr-download-html">Завантажити HTML</button>
-        <button class="btn btn-secondary btn-sm" id="dr-back">← Назад у систему</button>
-      </div>
-    </div>
-    <div class="tabs">
-      <button class="tab-btn active" data-dr-tab="directors">Директори</button>
-    </div>
-    <div id="dr-content-area">
-      <!-- filled dynamically -->
-    </div>
-  `;
-  document.getElementById('dr-back').onclick = closeDirectorReportView;
-  document.getElementById('dr-download-html').onclick = downloadDirectorReportHtml;
-  document.getElementById('dr-upload').onclick = openDirectorReportUploadModal;
-}
-
-function openDirectorReportUploadModal() {
-  const root = document.getElementById('modal-root');
-  const lastUpdated = fmtUploadedAt(state.directorReportLastUpdated);
-  root.innerHTML = `
-    <div class="modal-backdrop" id="dr-upload-backdrop">
-      <div class="modal">
-        <button class="modal-close" id="dr-upload-close">✕</button>
-        <h2>Завантажити звіт для РК</h2>
-        <p class="modal-subtitle">Весь файл з аркушем «Деталізація» — квартал визначається автоматично з дати, оновлюється лише знайдений квартал.</p>
-        <div class="field-group">
-          <label>Файл</label>
-          <input type="file" id="dr-upload-file" accept=".xls,.xlsx">
-          <div class="field-hint">${lastUpdated ? `Востаннє оновлено: ${lastUpdated}` : 'Ще не завантажувалось'}</div>
-        </div>
-        <div id="dr-upload-preview"></div>
-        <div id="dr-upload-error" class="error-text"></div>
-        <div class="modal-actions">
-          <button class="btn btn-secondary" id="dr-upload-cancel">Скасувати</button>
-          <button class="btn btn-primary" id="dr-upload-parse">Перевірити файл</button>
-        </div>
-      </div>
-    </div>
-  `;
-  document.getElementById('dr-upload-close').onclick = closeModal;
-  document.getElementById('dr-upload-cancel').onclick = closeModal;
-  document.getElementById('dr-upload-backdrop').addEventListener('click', (e) => {
-    if (e.target.id === 'dr-upload-backdrop') closeModal();
-  });
-  document.getElementById('dr-upload-parse').onclick = handleDirectorReportParse;
-}
-
-async function handleDirectorReportParse() {
-  const errorEl = document.getElementById('dr-upload-error');
-  errorEl.textContent = '';
-  const file = document.getElementById('dr-upload-file').files[0];
-  if (!file) { errorEl.textContent = 'Оберіть файл.'; return; }
-
-  let rows;
-  try {
-    rows = await readDirectorReportWorkbookRows(file);
-  } catch (e) {
-    errorEl.textContent = `Помилка читання файлу: ${e.message}`;
-    return;
-  }
-  if (!rows.length) {
-    errorEl.textContent = 'Не знайдено жодного рядка на аркуші «Деталізація».';
-    return;
-  }
-
-  const byQuarter = {};
-  rows.forEach((r) => {
-    const key = `${r.year} Q${r.quarter}`;
-    byQuarter[key] = (byQuarter[key] || 0) + 1;
-  });
-  const quarterSummaries = Object.entries(byQuarter)
-    .map(([key, count]) => ({ key, count }))
-    .sort((a, b) => a.key.localeCompare(b.key));
-
-  document.getElementById('dr-upload-preview').innerHTML = `
-    <div class="upload-summary">«${escapeHtml(file.name)}» — усього ${rows.length} рядків, буде оновлено квартали:<br>${quarterSummaries.map((q) => `${escapeHtml(q.key)}: ${q.count} рядків`).join('<br>')}</div>
-  `;
-  const actions = document.querySelector('#dr-upload-backdrop .modal-actions');
-  actions.innerHTML = `
-    <button class="btn btn-secondary" id="dr-upload-cancel2">Скасувати</button>
-    <button class="btn btn-primary" id="dr-upload-save">Зберегти</button>
-  `;
-  document.getElementById('dr-upload-cancel2').onclick = closeModal;
-  document.getElementById('dr-upload-save').onclick = async () => {
-    const btn = document.getElementById('dr-upload-save');
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span> Збереження…';
-    try {
-      const resp = await api('/api/upload-director-report', { method: 'POST', body: JSON.stringify({ rows }) });
-      closeModal();
-      showToast(`Звіт для РК збережено: ${resp.quarters.map((q) => q.label).join(', ')}.`);
-      const drData = await api('/api/director-report-last-updated');
-      state.directorReportLastUpdated = drData.lastUpdated || null;
-      await loadDirectorReportPeriods();
-    } catch (e) {
-      document.getElementById('dr-upload-error').textContent = e.message;
-      btn.disabled = false;
-      btn.textContent = 'Зберегти';
-    }
-  };
-}
-
-async function loadDirectorReportPeriods() {
-  const data = await api('/api/director-report-periods');
-  state.directorReport.periods = data.periods || [];
-  if (!state.directorReport.periods.length) {
-    document.getElementById('dr-content-area').innerHTML = `
-      <div class="empty-state">
-        <h2>Ще немає даних</h2>
-        <p>Завантажте аркуш «Деталізація» через звичайну модалку «Завантажити дані» на головному сайті (пункт «Звіт для РК» у списку проєктів).</p>
-      </div>`;
-    return;
-  }
-  const latest = state.directorReport.periods[state.directorReport.periods.length - 1];
-  if (!state.directorReport.year || !state.directorReport.periods.some(
-    (p) => p.year === state.directorReport.year && p.quarter === state.directorReport.quarter
-  )) {
-    state.directorReport.year = latest.year;
-    state.directorReport.quarter = latest.quarter;
-  }
-  renderDirectorReportContent();
-  await refreshDirectorReportFilters();
-  await refreshDirectorReportData();
-}
-
-function renderDirectorReportContent() {
-  const { periods, year, quarter, region, store } = state.directorReport;
-  const el = document.getElementById('dr-content-area');
-  const sortedPeriods = [...periods].reverse();
-  el.innerHTML = `
-    <div class="filters" id="dr-filters">
-      <div class="filter-field">
-        <label>Період</label>
-        <select id="dr-period">
-          ${sortedPeriods.map((p) => `<option value="${p.year}-${p.quarter}" ${p.year === year && p.quarter === quarter ? 'selected' : ''}>${escapeHtml(p.label)}${isCurrentQuarter(p.year, p.quarter) ? ' (поточний)' : ''}</option>`).join('')}
-        </select>
-      </div>
-      <div class="filter-field">
-        <label>Регіон</label>
-        <select id="dr-region"><option value="">Усі регіони</option></select>
-      </div>
-      <div class="filter-field">
-        <label>Магазин</label>
-        <select id="dr-store"><option value="">Усі магазини</option></select>
-      </div>
-    </div>
-    <div class="kpi-grid" id="dr-kpi-grid"></div>
-    <div class="card" id="dr-regions-card">
-      <h3>По регіонах</h3>
-      <p class="field-hint">Завжди всі регіони, незалежно від фільтра вище — для огляду по мережі одразу.</p>
-      <div class="table-scroll"><table class="data-table" id="dr-regions-table"></table></div>
-    </div>
-    <div class="card" id="dr-employees-card" hidden>
-      <h3>По співробітниках</h3>
-      <p class="field-hint">Натисни на рядок для деталізації по темах.</p>
-      <div class="table-scroll"><table class="data-table" id="dr-employees-table"></table></div>
-      <div id="dr-employees-pagination"></div>
-    </div>
-    <div class="card">
-      <h3>Результат по темам</h3>
-      <div class="table-scroll"><table class="data-table" id="dr-topics-table"></table></div>
-    </div>
-    <div class="card">
-      <h3>Низькі результати — історично</h3>
-      <p class="field-hint">Середній результат нижче 70% за всі квартали (мінімум 2 квартали в базі) — ті, на кого варто звернути увагу першочергово. Натисни на рядок для динаміки по кварталах.</p>
-      <div class="table-scroll"><table class="data-table" id="dr-historical-low-table"></table></div>
-      <div id="dr-historical-low-pagination"></div>
-    </div>
-    <div class="card">
-      <h3>ТОП <span class="muted">(середнє АТТ і Додаткового навчання &gt; 90%)</span></h3>
-      <div class="table-scroll"><table class="data-table" id="dr-top-table"></table></div>
-      <div id="dr-top-pagination"></div>
-    </div>
-  `;
-  document.getElementById('dr-period').addEventListener('change', async (e) => {
-    const [y, q] = e.target.value.split('-').map(Number);
-    state.directorReport.year = y;
-    state.directorReport.quarter = q;
-    state.directorReport.region = '';
-    state.directorReport.store = '';
-    await refreshDirectorReportFilters();
-    await refreshDirectorReportData();
-  });
-  document.getElementById('dr-region').addEventListener('change', async (e) => {
-    state.directorReport.region = e.target.value;
-    state.directorReport.store = '';
-    await refreshDirectorReportFilters();
-    await refreshDirectorReportData();
-  });
-  document.getElementById('dr-store').addEventListener('change', async (e) => {
-    state.directorReport.store = e.target.value;
-    await refreshDirectorReportData();
-  });
-}
-
-async function refreshDirectorReportFilters() {
-  const { year, quarter, region, store } = state.directorReport;
-  const data = await api(`/api/director-report-filters?${qs({ year, quarter, region })}`);
-  const regionSelect = document.getElementById('dr-region');
-  const storeSelect = document.getElementById('dr-store');
-  regionSelect.innerHTML = `<option value="">Усі регіони</option>${(data.regions || []).map((r) => `<option value="${escapeHtml(r)}" ${r === region ? 'selected' : ''}>${escapeHtml(r)}</option>`).join('')}`;
-  storeSelect.innerHTML = `<option value="">Усі магазини</option>${(data.stores || []).map((s) => `<option value="${escapeHtml(s)}" ${s === store ? 'selected' : ''}>${escapeHtml(s)}</option>`).join('')}`;
-}
-
-async function refreshDirectorReportData() {
-  const { year, quarter, region, store } = state.directorReport;
-  const params = { year, quarter, region, store };
-  const [summary, topics, top, historicalLow] = await Promise.all([
-    api(`/api/director-report-summary?${qs(params)}`),
-    api(`/api/director-report-topics?${qs(params)}`),
-    api(`/api/director-report-top?${qs(params)}`),
-    api(`/api/director-report-historical-low?${qs({ region, store })}`),
-  ]);
-  renderDirectorReportKpis(summary);
-  state._drHistoricalLow = historicalLow.people || [];
-  resetPageState('dr-historical-low');
-  renderDirectorReportHistoricalLow();
-  document.getElementById('dr-regions-card').hidden = !!region;
-  document.getElementById('dr-employees-card').hidden = !region;
-  if (region) {
-    const byEmployee = await api(`/api/director-report-by-employee?${qs(params)}`);
-    state._drEmployees = byEmployee.employees || [];
-    resetPageState('dr-employees');
-    renderDirectorReportEmployees();
-  } else {
-    const byRegion = await api(`/api/director-report-by-region?${qs({ year, quarter })}`);
-    renderDirectorReportByRegion(byRegion.regions || []);
-  }
-  renderDirectorReportTopics(topics.topics || []);
-  state._drTop = top.people || [];
-  resetPageState('dr-top');
-  renderDirectorReportTopTable();
-}
-
-function renderDirectorReportByRegion(regions) {
-  const table = document.getElementById('dr-regions-table');
-  table.innerHTML = `
-    <thead><tr><th>Регіон</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead>
-    <tbody>${regions.map((r) => `
-      <tr>
-        <td>${escapeHtml(r.region)}</td>
-        <td>${progressCellHtml(r.overall)}</td>
-        <td>${progressCellHtml(r.att)}</td>
-        <td>${progressCellHtml(r.additional)}</td>
-      </tr>`).join('') || `<tr><td colspan="4" class="muted">Немає даних</td></tr>`}</tbody>
-  `;
-}
-
-function renderDirectorReportEmployees() {
-  const rows = state._drEmployees || [];
-  const key = 'dr-employees';
-  const table = document.getElementById('dr-employees-table');
-  const pageRows = pageSlice(key, rows);
-  table.innerHTML = `
-    <thead><tr><th>ПІБ</th><th>Магазин</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead>
-    <tbody>${pageRows.map((e, i) => `
-      <tr class="row-clickable" data-idx="${i}">
-        <td>${escapeHtml(e.name)}</td>
-        <td>${escapeHtml(e.store)}</td>
-        <td>${progressCellHtml(e.overall)}</td>
-        <td>${progressCellHtml(e.att)}</td>
-        <td>${progressCellHtml(e.additional)}</td>
-      </tr>`).join('') || `<tr><td colspan="5" class="muted">Немає даних</td></tr>`}</tbody>
-  `;
-  table.querySelectorAll('tbody tr[data-idx]').forEach((tr) => {
-    const e = pageRows[Number(tr.dataset.idx)];
-    tr.addEventListener('click', () => openDirectorEmployeeModal(e));
-  });
-  const pager = document.getElementById('dr-employees-pagination');
-  pager.innerHTML = paginationBarHtml(key, rows.length);
-  wirePagination(pager, key, renderDirectorReportEmployees);
-}
-
-async function openDirectorEmployeeModal(employee) {
-  const { year, quarter } = state.directorReport;
-  const root = document.getElementById('modal-root');
-  root.innerHTML = `
-    <div class="modal-backdrop" id="dr-employee-backdrop">
-      <div class="modal" style="max-width:680px;">
-        <button class="modal-close" id="dr-employee-close">✕</button>
-        <h2>${escapeHtml(employee.name)}</h2>
-        <p class="modal-subtitle">${escapeHtml(employee.store)} · Загальний результат ${fmtPct(employee.overall)}</p>
-        <div class="table-scroll"><table class="data-table" id="dr-employee-topics-table">
-          <tbody><tr><td class="muted">Завантаження…</td></tr></tbody>
-        </table></div>
-      </div>
-    </div>
-  `;
-  document.getElementById('dr-employee-close').onclick = closeModal;
-  document.getElementById('dr-employee-backdrop').addEventListener('click', (e) => {
-    if (e.target.id === 'dr-employee-backdrop') closeModal();
-  });
-  const params = { year, quarter, store: employee.store, name: employee.name };
-  const data = await api(`/api/director-report-employee-topics?${qs(params)}`);
-  const topics = data.topics || [];
-  const table = document.getElementById('dr-employee-topics-table');
-  if (table) {
-    table.innerHTML = `
-      <thead><tr><th>Тема</th><th>Тип</th><th>Бал</th></tr></thead>
-      <tbody>${topics.map((t) => `
-        <tr>
-          <td>${escapeHtml(t.topic)}</td>
-          <td>${escapeHtml(t.trainingType)}</td>
-          <td>${progressCellHtml(t.score)}</td>
-        </tr>`).join('') || `<tr><td colspan="3" class="muted">Немає даних</td></tr>`}</tbody>
-    `;
-  }
-}
-
-function renderDirectorReportHistoricalLow() {
-  const rows = state._drHistoricalLow || [];
-  const key = 'dr-historical-low';
-  const table = document.getElementById('dr-historical-low-table');
-  const pageRows = pageSlice(key, rows);
-  table.innerHTML = `
-    <thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Кварталів</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead>
-    <tbody>${pageRows.map((p, i) => `
-      <tr class="row-clickable" data-idx="${i}">
-        <td>${escapeHtml(p.name)}</td>
-        <td>${escapeHtml(p.region)}</td>
-        <td>${escapeHtml(p.store)}</td>
-        <td>${fmtNum(p.quarterCount)}</td>
-        <td>${progressCellHtml(p.overall)}</td>
-        <td>${progressCellHtml(p.att)}</td>
-        <td>${progressCellHtml(p.additional)}</td>
-      </tr>`).join('') || `<tr><td colspan="7" class="muted">Немає — усі в нормі (≥70% за весь час)</td></tr>`}</tbody>
-  `;
-  table.querySelectorAll('tbody tr[data-idx]').forEach((tr) => {
-    const p = pageRows[Number(tr.dataset.idx)];
-    tr.addEventListener('click', () => openDirectorHistoricalTrendModal(p));
-  });
-  const pager = document.getElementById('dr-historical-low-pagination');
-  pager.innerHTML = paginationBarHtml(key, rows.length);
-  wirePagination(pager, key, renderDirectorReportHistoricalLow);
-}
-
-async function openDirectorHistoricalTrendModal(person) {
-  const root = document.getElementById('modal-root');
-  root.innerHTML = `
-    <div class="modal-backdrop" id="dr-trend-backdrop">
-      <div class="modal" style="max-width:680px;">
-        <button class="modal-close" id="dr-trend-close">✕</button>
-        <h2>${escapeHtml(person.name)}</h2>
-        <p class="modal-subtitle">${escapeHtml(person.store)} · Середній за весь час ${fmtPct(person.overall)} (${fmtNum(person.quarterCount)} квартали)</p>
-        <div class="table-scroll"><table class="data-table" id="dr-trend-table">
-          <tbody><tr><td class="muted">Завантаження…</td></tr></tbody>
-        </table></div>
-      </div>
-    </div>
-  `;
-  document.getElementById('dr-trend-close').onclick = closeModal;
-  document.getElementById('dr-trend-backdrop').addEventListener('click', (e) => {
-    if (e.target.id === 'dr-trend-backdrop') closeModal();
-  });
-  const data = await api(`/api/director-report-historical-trend?${qs({ name: person.name })}`);
-  const quarters = data.quarters || [];
-  const table = document.getElementById('dr-trend-table');
-  if (table) {
-    table.innerHTML = `
-      <thead><tr><th>Квартал</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead>
-      <tbody>${quarters.map((q) => `
-        <tr>
-          <td>Q${q.quarter} ${q.year}</td>
-          <td>${progressCellHtml(q.overall)}</td>
-          <td>${progressCellHtml(q.att)}</td>
-          <td>${progressCellHtml(q.additional)}</td>
-        </tr>`).join('') || `<tr><td colspan="4" class="muted">Немає даних</td></tr>`}</tbody>
-    `;
-  }
-}
-
-function renderDirectorReportKpis(summary) {
-  const tiles = [
-    { label: 'Результат АТТ', value: fmtPct(summary.att), accent: 'green' },
-    { label: 'Результат додаткового навчання', value: fmtPct(summary.additional), accent: 'green' },
-    { label: 'Загальний результат', value: fmtPct(summary.overall), accent: '' },
-  ];
-  document.getElementById('dr-kpi-grid').innerHTML = tiles.map((tl) => `
-    <div class="kpi-tile ${tl.accent ? `accent-${tl.accent}` : ''}">
-      <div class="kpi-value">${tl.value}</div>
-      <div class="kpi-label">${escapeHtml(tl.label)}</div>
-    </div>`).join('');
-}
-
-function renderDirectorReportTopics(topics) {
-  const table = document.getElementById('dr-topics-table');
-  table.innerHTML = `
-    <thead><tr><th>Тема</th><th>Тип</th><th>Середній бал</th><th>Залученість</th></tr></thead>
-    <tbody>${topics.map((t) => `
-      <tr>
-        <td>${escapeHtml(t.topic)}</td>
-        <td>${escapeHtml(t.trainingType)}</td>
-        <td>${progressCellHtml(t.avg)}</td>
-        <td>${progressCellHtml(t.completionRate)}</td>
-      </tr>`).join('') || `<tr><td colspan="4" class="muted">Немає даних</td></tr>`}</tbody>
-  `;
-}
-
-function renderDirectorReportTopTable() {
-  const rows = state._drTop || [];
-  const key = 'dr-top';
-  const table = document.getElementById('dr-top-table');
-  const pageRows = pageSlice(key, rows);
-  table.innerHTML = `
-    <thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>АТТ</th><th>Додаткове навчання</th><th>Середнє</th></tr></thead>
-    <tbody>${pageRows.map((p) => `
-      <tr>
-        <td>${escapeHtml(p.name)}</td>
-        <td>${escapeHtml(p.region)}</td>
-        <td>${escapeHtml(p.store)}</td>
-        <td>${progressCellHtml(p.att)}</td>
-        <td>${progressCellHtml(p.additional)}</td>
-        <td>${progressCellHtml(p.rankScore)}</td>
-      </tr>`).join('') || `<tr><td colspan="6" class="muted">Немає даних</td></tr>`}</tbody>
-  `;
-  const pager = document.getElementById('dr-top-pagination');
-  pager.innerHTML = paginationBarHtml(key, rows.length);
-  wirePagination(pager, key, renderDirectorReportTopTable);
-}
-
-// Fully client-side snapshot: clone the currently-filtered report, inline
-// the stylesheet, and trigger a download — so it can be opened/forwarded
-// without access to the site at all (the original ask behind this whole
-// feature). No server round trip, no extra route.
-// Unlike the old "photograph the current screen" approach, this bakes ALL
-// of the quarter's raw rows into the file and ships a small self-contained
-// script that redoes the same aggregation the backend does — so region/
-// store filtering (and the full antitop lists, not just the visible
-// pagination page) keep working offline, with zero server round trips,
-// once the file has left the browser.
+/* ===================== file helpers (inline assets for downloaded HTML) ===================== */
 function blobToDataUrl(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -3975,19 +3640,19 @@ async function fetchAsDataUrl(path) {
   }
 }
 
-// Inlines the site's actual font files and logo as base64 data URLs so the
-// downloaded file renders with the real COMFY branding (Comfy Semi-Bold /
-// PT Root UI) instead of falling back to a system font — the relative
-// "../fonts/..." paths in the site's own stylesheet only resolve from
-// /static/css/, not from wherever this file ends up once downloaded.
-async function downloadDirectorReportHtml() {
-  const { year, quarter } = state.directorReport;
-  const btn = document.getElementById('dr-download-html');
-  if (btn) { btn.disabled = true; btn.textContent = 'Готую файл…'; }
+
+/* ===================== tab snapshot ("Завантажити HTML") =====================
+   Saves what the current tab shows (with its filters) as one self-contained
+   HTML file: site CSS with the fonts and logo inlined, charts turned into
+   images, form controls into plain text. It's a snapshot — sorting,
+   tooltips and drill-down windows don't work in the file. */
+async function downloadTabSnapshot() {
+  const btn = document.getElementById('btn-snapshot');
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Готую файл…';
   try {
-    const [rawData, allData, css, logoDataUrl, comfySemiBold, ptRegular, ptMedium, ptBold] = await Promise.all([
-      api(`/api/director-report-raw?${qs({ year, quarter })}`),
-      api(`/api/director-report-raw-all`),
+    const tabName = (document.querySelector('.tabs .tab-btn.active') || {}).textContent || 'Дашборд';
+    const [css, logo, comfySemiBold, ptRegular, ptMedium, ptBold] = await Promise.all([
       fetch('static/css/style.css').then((r) => r.text()).catch(() => ''),
       fetchAsDataUrl('/static/assets/logo_green.png'),
       fetchAsDataUrl('/static/fonts/ComfySemiBold/Comfy-Semi-Bold.woff2'),
@@ -3999,852 +3664,89 @@ async function downloadDirectorReportHtml() {
 @font-face { font-family: 'Comfy Semi-Bold'; src: url('${comfySemiBold}') format('woff2'); font-weight: 600; font-style: normal; }
 @font-face { font-family: 'PT Root UI'; src: url('${ptRegular}') format('woff2'); font-weight: 400; font-style: normal; }
 @font-face { font-family: 'PT Root UI'; src: url('${ptMedium}') format('woff2'); font-weight: 500; font-style: normal; }
-@font-face { font-family: 'PT Root UI'; src: url('${ptBold}') format('woff2'); font-weight: 700; font-style: normal; }
-`;
-    // Drop the site's own @font-face rules (relative paths that won't
-    // resolve) and replace them with the inlined data-URL versions above.
-    const inlinedCss = fontCss + css.replace(/@font-face\s*\{[^}]*\}/g, '');
-    const periodLabel = `Q${quarter} ${year}`;
-    const title = `Звіт для РК — ${periodLabel}`;
-    // Guard against a topic/name containing a literal "</script>" breaking
-    // out of the embedded data block.
-    const rowsJson = JSON.stringify(rawData.rows || []).replace(/<\/script/gi, '<\\/script');
-    const allRowsJson = JSON.stringify(allData.rows || []).replace(/<\/script/gi, '<\\/script');
-    const html = buildDirectorReportExportHtml({ title, periodLabel, css: inlinedCss, logoDataUrl, rowsJson, allRowsJson });
-    const blob = new Blob([html], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `Звіт для РК - ${periodLabel}.html`.replace(/[\\/:*?"<>|]/g, '_');
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  } catch (e) {
-    showToast(`Не вдалося згенерувати файл: ${e.message}`, true);
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Завантажити HTML'; }
-  }
-}
+@font-face { font-family: 'PT Root UI'; src: url('${ptBold}') format('woff2'); font-weight: 700; font-style: normal; }`;
+    const siteCss = fontCss + css.replace(/@font-face\s*\{[^}]*\}/g, '');
 
-function buildDirectorReportExportHtml({ title, periodLabel, css, logoDataUrl, rowsJson, allRowsJson }) {
-  return `<!doctype html>
-<html lang="uk"><head><meta charset="utf-8">
-<title>${escapeHtml(title)}</title>
-<style>${css}
-body { background: var(--color-bg); padding: 24px; }
-</style>
-</head><body>
-<noscript>
-  <div class="card" style="border:2px solid var(--color-red); margin-bottom:16px;">
-    <h3 style="color:var(--color-red);">Дані не завантажились</h3>
-    <p>Цей файл показує результати за допомогою JavaScript, а переглядач, яким він зараз відкритий (вбудований перегляд у месенджері чи пошті), його не виконує.</p>
-    <p><strong>Що робити:</strong> збережіть файл і відкрийте його напряму в браузері — на iPhone через «Поділитися» → «Відкрити у Safari», на Android — «Відкрити за допомогою» → Chrome.</p>
-  </div>
-</noscript>
-<div id="x-modal-root"></div>
-<div class="top-bar" style="margin-bottom:20px;">
-  <div class="brand">
-    ${logoDataUrl ? `<img class="logo" src="${logoDataUrl}" alt="COMFY">` : ''}
-    <div>
-      <div class="brand-title">Звіт для РК</div>
-      <div class="brand-subtitle">${escapeHtml(periodLabel)} · Знято ${new Date().toLocaleDateString('uk-UA')}</div>
-    </div>
-  </div>
-</div>
-<div class="filters" id="x-filters">
-  <div class="filter-field">
-    <label>Регіон</label>
-    <select id="x-region"><option value="">Усі регіони</option></select>
-  </div>
-  <div class="filter-field">
-    <label>Магазин</label>
-    <select id="x-store"><option value="">Усі магазини</option></select>
-  </div>
-</div>
-<div class="kpi-grid" id="x-kpi"></div>
-<div class="card" id="x-regions-card">
-  <h3>По регіонах</h3>
-  <p class="field-hint">Завжди всі регіони, незалежно від фільтра вище.</p>
-  <div class="table-scroll"><table class="data-table" id="x-regions"></table></div>
-</div>
-<div class="card" id="x-employees-card" hidden>
-  <h3>По співробітниках</h3>
-  <p class="field-hint">Натисни на рядок для деталізації по темах.</p>
-  <div class="table-scroll"><table class="data-table" id="x-employees"></table></div>
-</div>
-<div class="card">
-  <h3>Результат по темам</h3>
-  <div class="table-scroll"><table class="data-table" id="x-topics"></table></div>
-</div>
-<div class="card">
-  <h3>Низькі результати — історично</h3>
-  <p class="field-hint">Середній результат нижче 70% за всі квартали (мінімум 2 квартали в базі) — ті, на кого варто звернути увагу першочергово. Натисни на рядок для динаміки по кварталах.</p>
-  <div class="table-scroll"><table class="data-table" id="x-historical-low"></table></div>
-</div>
-<div class="card">
-  <h3>ТОП <span class="muted">(середнє АТТ і Додаткового навчання &gt; 90%)</span></h3>
-  <div class="table-scroll"><table class="data-table" id="x-top"></table></div>
-</div>
-<script>
-'use strict';
-const ROWS = ${rowsJson};
-const ALL_ROWS = ${allRowsJson};
-
-function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-function fmtPct(v) { return v === null || v === undefined || Number.isNaN(v) ? '—' : (Math.round(v * 10) / 10) + '%'; }
-function bucket(v) {
-  if (v === null || v === undefined || Number.isNaN(v)) return 'red';
-  if (v >= 90) return 'good'; if (v >= 70) return 'yellow'; if (v >= 40) return 'orange'; return 'red';
-}
-function progressCell(v) {
-  const pct = Math.max(0, Math.min(100, v || 0));
-  return '<div class="progress-cell"><div class="progress-bar-track"><div class="progress-bar-fill fill-' + bucket(v) + '" style="width:' + pct + '%"></div></div><div class="value">' + fmtPct(v) + '</div></div>';
-}
-function avg(arr) { return arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : null; }
-
-function stats(rows) {
-  const att = rows.filter((r) => r.trainingType === 'АТТ').map((r) => r.score);
-  const additional = rows.filter((r) => r.trainingType === 'Додаткове навчання').map((r) => r.score);
-  const all = rows.map((r) => r.score);
-  return { att: avg(att), additional: avg(additional), overall: avg(all) };
-}
-function employeesOf(rows) {
-  const groups = {};
-  rows.filter((r) => r.name).forEach((r) => {
-    const key = r.name + '|' + r.store;
-    (groups[key] = groups[key] || { name: r.name, store: r.store, rows: [] }).rows.push(r);
-  });
-  return Object.values(groups)
-    .map((g) => ({ name: g.name, store: g.store, ...stats(g.rows) }))
-    .sort((a, b) => (b.overall ?? -1) - (a.overall ?? -1));
-}
-function topicsOf(rows) {
-  const groups = {};
-  rows.forEach((r) => {
-    const key = r.topic + '|' + r.trainingType;
-    (groups[key] = groups[key] || { topic: r.topic, trainingType: r.trainingType, scores: [] }).scores.push(r.score);
-  });
-  return Object.values(groups)
-    .map((g) => ({
-      topic: g.topic, trainingType: g.trainingType, avg: avg(g.scores),
-      completionRate: g.scores.length ? (g.scores.filter((s) => s > 0).length / g.scores.length) * 100 : null,
-    }))
-    .sort((a, b) => a.trainingType.localeCompare(b.trainingType) || a.topic.localeCompare(b.topic, 'uk'));
-}
-function topOf(rows) {
-  const groups = {};
-  rows.filter((r) => r.name).forEach((r) => {
-    const key = r.name + '|' + r.region + '|' + r.store;
-    const g = groups[key] = groups[key] || {
-      name: r.name, region: r.region, store: r.store,
-      attSum: 0, attCount: 0, addSum: 0, addCount: 0,
-    };
-    if (r.trainingType === 'АТТ') { g.attSum += r.score; g.attCount += 1; }
-    else if (r.trainingType === 'Додаткове навчання') { g.addSum += r.score; g.addCount += 1; }
-  });
-  return Object.values(groups)
-    .map((g) => {
-      const att = g.attCount ? g.attSum / g.attCount : null;
-      const additional = g.addCount ? g.addSum / g.addCount : null;
-      const values = [att, additional].filter((v) => v !== null);
-      return values.length ? { name: g.name, region: g.region, store: g.store, att, additional, rankScore: values.reduce((s, v) => s + v, 0) / values.length } : null;
-    })
-    .filter((p) => p && p.rankScore > 90)
-    .sort((a, b) => b.rankScore - a.rankScore)
-    .slice(0, 100);
-}
-function byRegionOf(rows) {
-  const regions = [...new Set(rows.map((r) => r.region).filter(Boolean))];
-  return regions.map((region) => ({ region, ...stats(rows.filter((r) => r.region === region)) }))
-    .sort((a, b) => (b.overall ?? -1) - (a.overall ?? -1));
-}
-
-function historicalLowOf(region, store) {
-  const scoped = ALL_ROWS.filter((r) => r.name && (!region || r.region === region) && (!store || r.store === store));
-  const groups = {};
-  scoped.forEach((r) => {
-    const g = groups[r.name] = groups[r.name] || {
-      name: r.name, region: r.region, store: r.store, latestKey: -1, quarters: new Set(),
-      attSum: 0, attCount: 0, addSum: 0, addCount: 0, allSum: 0, allCount: 0,
-    };
-    const qkey = r.year * 10 + r.quarter;
-    g.quarters.add(qkey);
-    if (qkey > g.latestKey) { g.latestKey = qkey; g.region = r.region; g.store = r.store; }
-    g.allSum += r.score; g.allCount += 1;
-    if (r.trainingType === 'АТТ') { g.attSum += r.score; g.attCount += 1; }
-    else if (r.trainingType === 'Додаткове навчання') { g.addSum += r.score; g.addCount += 1; }
-  });
-  return Object.values(groups)
-    .filter((g) => g.quarters.size >= 2)
-    .map((g) => ({
-      name: g.name, region: g.region, store: g.store, quarterCount: g.quarters.size,
-      att: g.attCount ? g.attSum / g.attCount : null,
-      additional: g.addCount ? g.addSum / g.addCount : null,
-      overall: g.allCount ? g.allSum / g.allCount : null,
-    }))
-    .filter((p) => p.overall !== null && p.overall < 70)
-    .sort((a, b) => a.overall - b.overall || b.quarterCount - a.quarterCount)
-    .slice(0, 100);
-}
-function historicalTrendOf(name) {
-  const groups = {};
-  ALL_ROWS.filter((r) => r.name === name).forEach((r) => {
-    const key = r.year + '-' + r.quarter;
-    const g = groups[key] = groups[key] || { year: r.year, quarter: r.quarter, attSum: 0, attCount: 0, addSum: 0, addCount: 0, allSum: 0, allCount: 0 };
-    g.allSum += r.score; g.allCount += 1;
-    if (r.trainingType === 'АТТ') { g.attSum += r.score; g.attCount += 1; }
-    else if (r.trainingType === 'Додаткове навчання') { g.addSum += r.score; g.addCount += 1; }
-  });
-  return Object.values(groups)
-    .map((g) => ({
-      year: g.year, quarter: g.quarter,
-      att: g.attCount ? g.attSum / g.attCount : null,
-      additional: g.addCount ? g.addSum / g.addCount : null,
-      overall: g.allCount ? g.allSum / g.allCount : null,
-    }))
-    .sort((a, b) => a.year - b.year || a.quarter - b.quarter);
-}
-
-function filteredRows() {
-  const region = document.getElementById('x-region').value;
-  const store = document.getElementById('x-store').value;
-  return ROWS.filter((r) => (!region || r.region === region) && (!store || r.store === store));
-}
-
-function renderKpi(s) {
-  const tiles = [
-    ['Результат АТТ', fmtPct(s.att), 'accent-green'],
-    ['Результат додаткового навчання', fmtPct(s.additional), 'accent-green'],
-    ['Загальний результат', fmtPct(s.overall), ''],
-  ];
-  document.getElementById('x-kpi').innerHTML = tiles.map((t) =>
-    '<div class="kpi-tile ' + t[2] + '"><div class="kpi-value">' + t[1] + '</div><div class="kpi-label">' + esc(t[0]) + '</div></div>'
-  ).join('');
-}
-function renderRegions(regions) {
-  document.getElementById('x-regions').innerHTML =
-    '<thead><tr><th>Регіон</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead><tbody>' +
-    (regions.map((r) => '<tr><td>' + esc(r.region) + '</td><td>' + progressCell(r.overall) + '</td><td>' + progressCell(r.att) + '</td><td>' + progressCell(r.additional) + '</td></tr>').join('')
-      || '<tr><td colspan="4" class="muted">Немає даних</td></tr>') + '</tbody>';
-}
-function renderEmployees(employees) {
-  const el = document.getElementById('x-employees');
-  el.innerHTML =
-    '<thead><tr><th>ПІБ</th><th>Магазин</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead><tbody>' +
-    (employees.map((e, i) => '<tr class="row-clickable" data-idx="' + i + '"><td>' + esc(e.name) + '</td><td>' + esc(e.store) + '</td><td>' + progressCell(e.overall) + '</td><td>' + progressCell(e.att) + '</td><td>' + progressCell(e.additional) + '</td></tr>').join('')
-      || '<tr><td colspan="5" class="muted">Немає даних</td></tr>') + '</tbody>';
-  el.querySelectorAll('tbody tr[data-idx]').forEach((tr) => {
-    const e = employees[Number(tr.dataset.idx)];
-    tr.addEventListener('click', () => openEmployeeModal(e));
-  });
-}
-function closeEmployeeModal() {
-  document.getElementById('x-modal-root').innerHTML = '';
-}
-function openEmployeeModal(employee) {
-  const topics = ROWS.filter((r) => r.name === employee.name && r.store === employee.store)
-    .map((r) => ({ topic: r.topic, trainingType: r.trainingType, score: r.score }))
-    .sort((a, b) => a.trainingType.localeCompare(b.trainingType) || a.topic.localeCompare(b.topic, 'uk'));
-  document.getElementById('x-modal-root').innerHTML =
-    '<div class="modal-backdrop" id="x-employee-backdrop">' +
-      '<div class="modal" style="max-width:680px;">' +
-        '<button class="modal-close" id="x-employee-close">✕</button>' +
-        '<h2>' + esc(employee.name) + '</h2>' +
-        '<p class="modal-subtitle">' + esc(employee.store) + ' · Загальний результат ' + fmtPct(employee.overall) + '</p>' +
-        '<div class="table-scroll"><table class="data-table"><thead><tr><th>Тема</th><th>Тип</th><th>Бал</th></tr></thead><tbody>' +
-        (topics.map((t) => '<tr><td>' + esc(t.topic) + '</td><td>' + esc(t.trainingType) + '</td><td>' + progressCell(t.score) + '</td></tr>').join('')
-          || '<tr><td colspan="3" class="muted">Немає даних</td></tr>') +
-        '</tbody></table></div>' +
-      '</div>' +
-    '</div>';
-  document.getElementById('x-employee-close').onclick = closeEmployeeModal;
-  document.getElementById('x-employee-backdrop').addEventListener('click', (e) => {
-    if (e.target.id === 'x-employee-backdrop') closeEmployeeModal();
-  });
-}
-function renderTopics(topics) {
-  document.getElementById('x-topics').innerHTML =
-    '<thead><tr><th>Тема</th><th>Тип</th><th>Середній бал</th><th>Залученість</th></tr></thead><tbody>' +
-    (topics.map((t) => '<tr><td>' + esc(t.topic) + '</td><td>' + esc(t.trainingType) + '</td><td>' + progressCell(t.avg) + '</td><td>' + progressCell(t.completionRate) + '</td></tr>').join('')
-      || '<tr><td colspan="4" class="muted">Немає даних</td></tr>') + '</tbody>';
-}
-function renderTop(people) {
-  document.getElementById('x-top').innerHTML =
-    '<thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>АТТ</th><th>Додаткове навчання</th><th>Середнє</th></tr></thead><tbody>' +
-    (people.map((p) => '<tr><td>' + esc(p.name) + '</td><td>' + esc(p.region) + '</td><td>' + esc(p.store) + '</td><td>' + progressCell(p.att) + '</td><td>' + progressCell(p.additional) + '</td><td>' + progressCell(p.rankScore) + '</td></tr>').join('')
-      || '<tr><td colspan="6" class="muted">Немає даних</td></tr>') + '</tbody>';
-}
-function renderHistoricalLow(people) {
-  const el = document.getElementById('x-historical-low');
-  el.innerHTML =
-    '<thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Кварталів</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead><tbody>' +
-    (people.map((p, i) => '<tr class="row-clickable" data-idx="' + i + '"><td>' + esc(p.name) + '</td><td>' + esc(p.region) + '</td><td>' + esc(p.store) + '</td><td>' + p.quarterCount + '</td><td>' + progressCell(p.overall) + '</td><td>' + progressCell(p.att) + '</td><td>' + progressCell(p.additional) + '</td></tr>').join('')
-      || '<tr><td colspan="7" class="muted">Немає — усі в нормі (≥70% за весь час)</td></tr>') + '</tbody>';
-  el.querySelectorAll('tbody tr[data-idx]').forEach((tr) => {
-    const p = people[Number(tr.dataset.idx)];
-    tr.addEventListener('click', () => openHistoricalTrendModal(p));
-  });
-}
-function openHistoricalTrendModal(person) {
-  const quarters = historicalTrendOf(person.name);
-  document.getElementById('x-modal-root').innerHTML =
-    '<div class="modal-backdrop" id="x-trend-backdrop">' +
-      '<div class="modal" style="max-width:680px;">' +
-        '<button class="modal-close" id="x-trend-close">✕</button>' +
-        '<h2>' + esc(person.name) + '</h2>' +
-        '<p class="modal-subtitle">' + esc(person.store) + ' · Середній за весь час ' + fmtPct(person.overall) + ' (' + person.quarterCount + ' квартали)</p>' +
-        '<div class="table-scroll"><table class="data-table"><thead><tr><th>Квартал</th><th>Загальний результат</th><th>АТТ</th><th>Додаткове навчання</th></tr></thead><tbody>' +
-        (quarters.map((q) => '<tr><td>Q' + q.quarter + ' ' + q.year + '</td><td>' + progressCell(q.overall) + '</td><td>' + progressCell(q.att) + '</td><td>' + progressCell(q.additional) + '</td></tr>').join('')
-          || '<tr><td colspan="4" class="muted">Немає даних</td></tr>') +
-        '</tbody></table></div>' +
-      '</div>' +
-    '</div>';
-  document.getElementById('x-trend-close').onclick = closeEmployeeModal;
-  document.getElementById('x-trend-backdrop').addEventListener('click', (e) => {
-    if (e.target.id === 'x-trend-backdrop') closeEmployeeModal();
-  });
-}
-
-function render() {
-  const rows = filteredRows();
-  const region = document.getElementById('x-region').value;
-  const store = document.getElementById('x-store').value;
-  renderKpi(stats(rows));
-  document.getElementById('x-regions-card').hidden = !!region;
-  document.getElementById('x-employees-card').hidden = !region;
-  if (region) {
-    renderEmployees(employeesOf(rows));
-  } else {
-    renderRegions(byRegionOf(ROWS));
-  }
-  renderTopics(topicsOf(rows));
-  renderHistoricalLow(historicalLowOf(region, store));
-  renderTop(topOf(rows));
-}
-
-function populateFilters() {
-  const regionSelect = document.getElementById('x-region');
-  const storeSelect = document.getElementById('x-store');
-  const regions = [...new Set(ROWS.map((r) => r.region).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'uk'));
-  regionSelect.innerHTML = '<option value="">Усі регіони</option>' + regions.map((r) => '<option value="' + esc(r) + '">' + esc(r) + '</option>').join('');
-  function refreshStoreOptions() {
-    const region = regionSelect.value;
-    const stores = [...new Set(ROWS.filter((r) => !region || r.region === region).map((r) => r.store).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'uk'));
-    storeSelect.innerHTML = '<option value="">Усі магазини</option>' + stores.map((s) => '<option value="' + esc(s) + '">' + esc(s) + '</option>').join('');
-  }
-  refreshStoreOptions();
-  regionSelect.addEventListener('change', () => { storeSelect.value = ''; refreshStoreOptions(); render(); });
-  storeSelect.addEventListener('change', render);
-}
-
-populateFilters();
-render();
-</script>
-</body></html>`;
-}
-
-/* ===================== lesson report ("Звіт по заняттям") =====================
-   Separate full-screen view for per-training-session reports — one upload
-   is one specific lesson (e.g. "Звіт по заняттю #1732: Прийом товару від
-   постачальника"), switchable between every lesson ever uploaded. Unlike
-   the director report's quarters, lessons aren't periodic: each is its own
-   permanent snapshot, and re-uploading the same lesson number replaces it
-   in place (upsert by lesson number, same shape as AEP/director report). */
-
-async function openLessonReportView() {
-  document.getElementById('app').hidden = true;
-  const view = document.getElementById('lesson-report-view');
-  view.hidden = false;
-  renderLessonReportShell();
-  await loadLessonReports();
-}
-
-function closeLessonReportView() {
-  document.getElementById('lesson-report-view').hidden = true;
-  document.getElementById('app').hidden = false;
-}
-
-function renderLessonReportShell() {
-  const view = document.getElementById('lesson-report-view');
-  view.innerHTML = `
-    <div class="top-bar">
-      <div class="brand">
-        <img class="logo" src="static/assets/logo_green.png" alt="COMFY">
-        <div>
-          <div class="brand-title">Звіт по заняттям</div>
-          <div class="brand-subtitle">Результати по окремих заняттях</div>
-        </div>
-      </div>
-      <div class="top-actions">
-        <button class="btn btn-primary btn-sm" id="lr-upload">Завантажити заняття</button>
-        <button class="btn btn-secondary btn-sm" id="lr-download-html">Завантажити HTML</button>
-        <button class="btn btn-secondary btn-sm" id="lr-back">← Назад у систему</button>
-      </div>
-    </div>
-    <div id="lr-content-area">
-      <!-- filled dynamically -->
-    </div>
-  `;
-  document.getElementById('lr-back').onclick = closeLessonReportView;
-  document.getElementById('lr-download-html').onclick = downloadLessonReportHtml;
-  document.getElementById('lr-upload').onclick = openLessonReportUploadModal;
-}
-
-function openLessonReportUploadModal() {
-  const root = document.getElementById('modal-root');
-  root.innerHTML = `
-    <div class="modal-backdrop" id="lr-upload-backdrop">
-      <div class="modal">
-        <button class="modal-close" id="lr-upload-close">✕</button>
-        <h2>Завантажити заняття</h2>
-        <p class="modal-subtitle">Файл «Звіт по заняттю» з LMS — номер і назва заняття визначаються автоматично з першого рядка файлу. Повторне завантаження того самого номера заняття замінює його повністю (оновлена версія).</p>
-        <div class="field-group">
-          <label>Файл</label>
-          <input type="file" id="lr-upload-file" accept=".xls,.xlsx">
-        </div>
-        <div id="lr-upload-preview"></div>
-        <div id="lr-upload-error" class="error-text"></div>
-        <div class="modal-actions">
-          <button class="btn btn-secondary" id="lr-upload-cancel">Скасувати</button>
-          <button class="btn btn-primary" id="lr-upload-parse">Перевірити файл</button>
-        </div>
-      </div>
-    </div>
-  `;
-  document.getElementById('lr-upload-close').onclick = closeModal;
-  document.getElementById('lr-upload-cancel').onclick = closeModal;
-  document.getElementById('lr-upload-backdrop').addEventListener('click', (e) => {
-    if (e.target.id === 'lr-upload-backdrop') closeModal();
-  });
-  document.getElementById('lr-upload-parse').onclick = handleLessonReportParse;
-}
-
-async function handleLessonReportParse() {
-  const errorEl = document.getElementById('lr-upload-error');
-  errorEl.textContent = '';
-  const file = document.getElementById('lr-upload-file').files[0];
-  if (!file) { errorEl.textContent = 'Оберіть файл.'; return; }
-
-  let parsed;
-  try {
-    parsed = await readLessonReportWorkbookRows(file);
-  } catch (e) {
-    errorEl.textContent = `Помилка читання файлу: ${e.message}`;
-    return;
-  }
-  if (!parsed.rows.length) {
-    errorEl.textContent = 'Не знайдено жодного рядка учасників у файлі.';
-    return;
-  }
-
-  const existing = state.lessonReport.lessons.find((l) => l.lessonKey === parsed.lessonKey);
-  document.getElementById('lr-upload-preview').innerHTML = `
-    <div class="upload-summary">Заняття #${escapeHtml(parsed.lessonKey)}: «${escapeHtml(parsed.title)}» — ${parsed.rows.length} учасників.${existing ? ' Це заняття вже є в базі — буде повністю оновлено (свіжа версія замінить попередню).' : ' Нове заняття.'}</div>
-  `;
-  const actions = document.querySelector('#lr-upload-backdrop .modal-actions');
-  actions.innerHTML = `
-    <button class="btn btn-secondary" id="lr-upload-cancel2">Скасувати</button>
-    <button class="btn btn-primary" id="lr-upload-save">Зберегти</button>
-  `;
-  document.getElementById('lr-upload-cancel2').onclick = closeModal;
-  document.getElementById('lr-upload-save').onclick = async () => {
-    const btn = document.getElementById('lr-upload-save');
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span> Збереження…';
-    try {
-      const resp = await api('/api/upload-lesson-report', {
-        method: 'POST',
-        body: JSON.stringify({ lessonKey: parsed.lessonKey, title: parsed.title, rows: parsed.rows }),
+    const parts = ['position-switch', 'content-area'].map((id) => document.getElementById(id)).filter((n) => n && !n.hidden);
+    const out = document.createElement('div');
+    parts.forEach((src) => {
+      const copy = src.cloneNode(true);
+      // charts: canvas pixels don't survive cloning
+      const srcCanvases = src.querySelectorAll('canvas');
+      copy.querySelectorAll('canvas').forEach((c, i) => {
+        const o = srcCanvases[i];
+        const img = document.createElement('img');
+        try { img.src = o.toDataURL('image/png'); } catch { return; }
+        img.style.width = `${o.clientWidth}px`; img.style.maxWidth = '100%'; img.style.height = 'auto';
+        c.replaceWith(img);
       });
-      closeModal();
-      showToast(`Заняття «${parsed.title}» збережено: ${resp.rowsCount} учасників.`);
-      await loadLessonReports(resp.lessonReportId);
-    } catch (e) {
-      document.getElementById('lr-upload-error').textContent = e.message;
-      btn.disabled = false;
-      btn.textContent = 'Зберегти';
-    }
-  };
-}
-
-async function loadLessonReports(selectId) {
-  const data = await api('/api/lesson-reports');
-  state.lessonReport.lessons = data.lessons || [];
-  if (!state.lessonReport.lessons.length) {
-    document.getElementById('lr-content-area').innerHTML = `
-      <div class="empty-state">
-        <h2>Ще немає занять</h2>
-        <p>Натисніть «Завантажити заняття» вгорі, щоб додати перший звіт.</p>
-      </div>`;
-    return;
-  }
-  const latest = state.lessonReport.lessons[state.lessonReport.lessons.length - 1];
-  const wanted = selectId || state.lessonReport.lessonReportId;
-  state.lessonReport.lessonReportId = state.lessonReport.lessons.some((l) => l.id === wanted)
-    ? wanted
-    : latest.id;
-  renderLessonReportContent();
-  await refreshLessonReportFilters();
-  await refreshLessonReportData();
-}
-
-function renderLessonReportContent() {
-  const { lessons, lessonReportId } = state.lessonReport;
-  const el = document.getElementById('lr-content-area');
-  const sortedLessons = [...lessons].reverse();
-  const mostRecentId = lessons[lessons.length - 1]?.id;
-  el.innerHTML = `
-    <div class="filters" id="lr-filters">
-      <div class="filter-field" style="min-width:280px;">
-        <label>Заняття</label>
-        <select id="lr-lesson">
-          ${sortedLessons.map((l) => `<option value="${l.id}" ${l.id === lessonReportId ? 'selected' : ''}>#${escapeHtml(l.lessonKey)}: ${escapeHtml(l.title)}${l.id === mostRecentId ? ' (останнє)' : ''}</option>`).join('')}
-        </select>
-        <div class="field-hint" id="lr-updated-hint"></div>
-      </div>
-      <div class="filter-field">
-        <label>Регіон</label>
-        <select id="lr-region"><option value="">Усі регіони</option></select>
-      </div>
-      <div class="filter-field">
-        <label>Магазин</label>
-        <select id="lr-store"><option value="">Усі магазини</option></select>
-      </div>
-      <div class="filter-field">
-        <label>Посада</label>
-        <select id="lr-position"><option value="">Усі посади</option></select>
-      </div>
-      <div class="filter-field" style="min-width:220px;">
-        <label>Пошук за ПІБ</label>
-        <input type="text" id="lr-search" placeholder="Прізвище, ім'я...">
-      </div>
-    </div>
-    <div class="kpi-grid" id="lr-kpi-grid"></div>
-    <div class="card">
-      <h3>По регіонах</h3>
-      <p class="field-hint">Завжди всі регіони, незалежно від фільтра вище.</p>
-      <div class="table-scroll"><table class="data-table" id="lr-regions-table"></table></div>
-    </div>
-    <div class="card">
-      <h3>Учасники</h3>
-      <p class="field-hint" id="lr-count-hint"></p>
-      <div class="table-scroll"><table class="data-table" id="lr-people-table"></table></div>
-      <div id="lr-people-pagination"></div>
-    </div>
-  `;
-  const updatedHint = document.getElementById('lr-updated-hint');
-  const current = lessons.find((l) => l.id === lessonReportId);
-  if (updatedHint && current) updatedHint.textContent = `Востаннє оновлено: ${fmtUploadedAt(current.uploadedAt)}`;
-
-  document.getElementById('lr-lesson').addEventListener('change', async (e) => {
-    state.lessonReport.lessonReportId = Number(e.target.value);
-    state.lessonReport.region = '';
-    state.lessonReport.store = '';
-    state.lessonReport.position = '';
-    state.lessonReport.search = '';
-    renderLessonReportContent();
-    await refreshLessonReportFilters();
-    await refreshLessonReportData();
-  });
-  document.getElementById('lr-region').addEventListener('change', async (e) => {
-    state.lessonReport.region = e.target.value;
-    state.lessonReport.store = '';
-    await refreshLessonReportFilters();
-    await refreshLessonReportData();
-  });
-  document.getElementById('lr-store').addEventListener('change', async (e) => {
-    state.lessonReport.store = e.target.value;
-    await refreshLessonReportData();
-  });
-  document.getElementById('lr-position').addEventListener('change', async (e) => {
-    state.lessonReport.position = e.target.value;
-    await refreshLessonReportData();
-  });
-  let searchDebounce;
-  document.getElementById('lr-search').addEventListener('input', (e) => {
-    clearTimeout(searchDebounce);
-    const value = e.target.value;
-    searchDebounce = setTimeout(async () => {
-      state.lessonReport.search = value;
-      await refreshLessonReportData();
-    }, 250);
-  });
-}
-
-async function refreshLessonReportFilters() {
-  const { lessonReportId, region, store, position } = state.lessonReport;
-  const data = await api(`/api/lesson-report-filters?${qs({ lessonReportId, region })}`);
-  const regionSelect = document.getElementById('lr-region');
-  const storeSelect = document.getElementById('lr-store');
-  const positionSelect = document.getElementById('lr-position');
-  regionSelect.innerHTML = `<option value="">Усі регіони</option>${(data.regions || []).map((r) => `<option value="${escapeHtml(r)}" ${r === region ? 'selected' : ''}>${escapeHtml(r)}</option>`).join('')}`;
-  storeSelect.innerHTML = `<option value="">Усі магазини</option>${(data.stores || []).map((s) => `<option value="${escapeHtml(s)}" ${s === store ? 'selected' : ''}>${escapeHtml(s)}</option>`).join('')}`;
-  positionSelect.innerHTML = `<option value="">Усі посади</option>${(data.positions || []).map((p) => `<option value="${escapeHtml(p)}" ${p === position ? 'selected' : ''}>${escapeHtml(p)}</option>`).join('')}`;
-}
-
-async function refreshLessonReportData() {
-  const { lessonReportId, region, store, position, search } = state.lessonReport;
-  const params = { lessonReportId, region, store, position, search };
-  const [summary, byRegion, people] = await Promise.all([
-    api(`/api/lesson-report-summary?${qs(params)}`),
-    api(`/api/lesson-report-by-region?${qs({ lessonReportId })}`),
-    api(`/api/lesson-report-people?${qs(params)}`),
-  ]);
-  renderLessonReportKpis(summary);
-  renderLessonReportByRegion(byRegion.regions || []);
-  state._lrPeople = people.people || [];
-  resetPageState('lr-people');
-  renderLessonReportPeopleTable();
-}
-
-function renderLessonReportKpis(summary) {
-  const tiles = [
-    { label: 'Пройшли матеріал', value: fmtPct(summary.material), accent: 'green' },
-    { label: 'Середній бал тесту', value: fmtPct(summary.test), accent: '' },
-    { label: 'Склали тест (100%)', value: `${fmtNum(summary.passed)} з ${fmtNum(summary.total)}`, accent: '' },
-  ];
-  document.getElementById('lr-kpi-grid').innerHTML = tiles.map((tl) => `
-    <div class="kpi-tile ${tl.accent ? `accent-${tl.accent}` : ''}">
-      <div class="kpi-value">${tl.value}</div>
-      <div class="kpi-label">${escapeHtml(tl.label)}</div>
-    </div>`).join('');
-}
-
-function renderLessonReportByRegion(regions) {
-  const table = document.getElementById('lr-regions-table');
-  table.innerHTML = `
-    <thead><tr><th>Регіон</th><th>Середній тест</th><th>Матеріал</th><th>Учасників</th></tr></thead>
-    <tbody>${regions.map((r) => `
-      <tr>
-        <td>${escapeHtml(r.region)}</td>
-        <td>${progressCellHtml(r.test)}</td>
-        <td>${progressCellHtml(r.material)}</td>
-        <td>${fmtNum(r.total)}</td>
-      </tr>`).join('') || `<tr><td colspan="4" class="muted">Немає даних</td></tr>`}</tbody>
-  `;
-}
-
-function renderLessonReportPeopleTable() {
-  const rows = state._lrPeople || [];
-  const key = 'lr-people';
-  const table = document.getElementById('lr-people-table');
-  const pageRows = pageSlice(key, rows);
-  table.innerHTML = `
-    <thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Посада</th><th>Матеріал</th><th>Тест</th><th>Дата тесту</th></tr></thead>
-    <tbody>${pageRows.map((p) => `
-      <tr>
-        <td>${escapeHtml(p.name)}</td>
-        <td>${escapeHtml(p.region)}</td>
-        <td>${escapeHtml(p.store)}</td>
-        <td>${escapeHtml(p.position)}</td>
-        <td>${progressCellHtml(p.material)}</td>
-        <td>${progressCellHtml(p.test)}</td>
-        <td>${escapeHtml(p.testDate || '—')}</td>
-      </tr>`).join('') || `<tr><td colspan="7" class="muted">Немає даних за цим фільтром</td></tr>`}</tbody>
-  `;
-  const hint = document.getElementById('lr-count-hint');
-  if (hint) hint.textContent = `Показано ${rows.length} учасників. Відсортовано від найгіршого результату тесту.`;
-  const pager = document.getElementById('lr-people-pagination');
-  pager.innerHTML = paginationBarHtml(key, rows.length);
-  wirePagination(pager, key, renderLessonReportPeopleTable);
-}
-
-// Same self-contained export pattern as the director report: bakes every
-// raw row into the file plus a small inline script that redoes the same
-// filtering/aggregation, so region/store/position/search keep working
-// fully offline once the file has left the browser.
-async function downloadLessonReportHtml() {
-  const { lessonReportId, lessons } = state.lessonReport;
-  const lesson = lessons.find((l) => l.id === lessonReportId);
-  if (!lesson) return;
-  const btn = document.getElementById('lr-download-html');
-  if (btn) { btn.disabled = true; btn.textContent = 'Готую файл…'; }
-  try {
-    const [rawData, css, logoDataUrl, comfySemiBold, ptRegular, ptMedium, ptBold] = await Promise.all([
-      api(`/api/lesson-report-raw?${qs({ lessonReportId })}`),
-      fetch('static/css/style.css').then((r) => r.text()).catch(() => ''),
-      fetchAsDataUrl('/static/assets/logo_green.png'),
-      fetchAsDataUrl('/static/fonts/ComfySemiBold/Comfy-Semi-Bold.woff2'),
-      fetchAsDataUrl('/static/fonts/PTRootUI/PT-Root-UI-Regular.woff2'),
-      fetchAsDataUrl('/static/fonts/PTRootUI/PT-Root-UI-Medium.woff2'),
-      fetchAsDataUrl('/static/fonts/PTRootUI/PT-Root-UI-Bold.woff2'),
-    ]);
-    const fontCss = `
-@font-face { font-family: 'Comfy Semi-Bold'; src: url('${comfySemiBold}') format('woff2'); font-weight: 600; font-style: normal; }
-@font-face { font-family: 'PT Root UI'; src: url('${ptRegular}') format('woff2'); font-weight: 400; font-style: normal; }
-@font-face { font-family: 'PT Root UI'; src: url('${ptMedium}') format('woff2'); font-weight: 500; font-style: normal; }
-@font-face { font-family: 'PT Root UI'; src: url('${ptBold}') format('woff2'); font-weight: 700; font-style: normal; }
-`;
-    const inlinedCss = fontCss + css.replace(/@font-face\s*\{[^}]*\}/g, '');
-    const title = `Звіт по заняттю #${lesson.lessonKey}: ${lesson.title}`;
-    const rowsJson = JSON.stringify(rawData.rows || []).replace(/<\/script/gi, '<\\/script');
-    const html = buildLessonReportExportHtml({ title, css: inlinedCss, logoDataUrl, rowsJson });
+      // selects -> the chosen value as text; inputs keep what was typed
+      const srcSelects = src.querySelectorAll('select');
+      copy.querySelectorAll('select').forEach((sel, i) => {
+        const o = srcSelects[i];
+        const chip = document.createElement('span');
+        chip.className = 'snap-chip';
+        chip.textContent = o.selectedOptions[0] ? o.selectedOptions[0].textContent : '';
+        sel.replaceWith(chip);
+      });
+      const srcInputs = src.querySelectorAll('input');
+      copy.querySelectorAll('input').forEach((inp, i) => {
+        const o = srcInputs[i];
+        if (o.type === 'checkbox' || o.type === 'radio') { if (o.checked) inp.setAttribute('checked', ''); else inp.removeAttribute('checked'); inp.disabled = true; return; }
+        if (o.type === 'file' || !o.value) { inp.remove(); return; }
+        const chip = document.createElement('span');
+        chip.className = 'snap-chip';
+        chip.textContent = o.value;
+        inp.replaceWith(chip);
+      });
+      // actions don't work in a file: keep only the switches that show the current view
+      copy.querySelectorAll('button').forEach((b) => {
+        if (b.classList.contains('active') || b.getAttribute('aria-pressed') === 'true' || b.classList.contains('kpi-half')) b.disabled = true;
+        else if (b.closest('.tabs, [role="group"]')) b.disabled = true;
+        else b.remove();
+      });
+      copy.querySelectorAll('[hidden]').forEach((n) => n.remove());
+      copy.removeAttribute('id');
+      out.append(copy);
+    });
+    const now = new Date();
+    const stamp = now.toLocaleDateString('uk-UA');
+    const html = `<!doctype html>
+<html lang="uk"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(`Навчання COMFY — ${tabName} — ${stamp}`)}</title>
+<style>${siteCss}
+body { background: var(--color-bg); }
+.snap-wrap { max-width: 1400px; margin: 0 auto; padding: 24px 16px; }
+.snap-chip { display: inline-block; padding: 6px 12px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-card); font-size: 13px; }
+.table-scroll, .lh-root .table-scroll.tall { max-height: none !important; }
+button:disabled { cursor: default; }
+.row-clickable, [style*="cursor: pointer"] { cursor: default !important; }
+</style>
+</head><body><div class="snap-wrap">
+<div class="top-bar" style="margin-bottom:20px;">
+  <div class="brand">
+    ${logo ? `<img class="logo" src="${logo}" alt="COMFY">` : ''}
+    <div><div class="brand-title">Навчання COMFY · ${escapeHtml(tabName)}</div>
+    <div class="brand-subtitle">Знято ${escapeHtml(stamp)} ${escapeHtml(now.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' }))} · знімок сторінки: сортування й деталізація не працюють</div></div>
+  </div>
+</div>
+${out.innerHTML.replace(/<script/gi, '&lt;script')}
+</div></body></html>`;
     const blob = new Blob([html], { type: 'text/html' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `Звіт - ${lesson.title} (${lesson.lessonKey}).html`.replace(/[\\/:*?"<>|]/g, '_');
+    a.download = `Навчання COMFY - ${tabName} - ${stamp}.html`.replace(/[\\/:*?"<>|]/g, '_');
     document.body.appendChild(a);
     a.click();
     a.remove();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   } catch (e) {
-    showToast(`Не вдалося згенерувати файл: ${e.message}`, true);
+    showToast(`Не вдалося зберегти файл: ${e.message}`, true);
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Завантажити HTML'; }
+    btn.disabled = false; btn.textContent = label;
   }
-}
-
-function buildLessonReportExportHtml({ title, css, logoDataUrl, rowsJson }) {
-  return `<!doctype html>
-<html lang="uk"><head><meta charset="utf-8">
-<title>${escapeHtml(title)}</title>
-<style>${css}
-body { background: var(--color-bg); padding: 24px; }
-</style>
-</head><body>
-<div class="top-bar" style="margin-bottom:20px;">
-  <div class="brand">
-    ${logoDataUrl ? `<img class="logo" src="${logoDataUrl}" alt="COMFY">` : ''}
-    <div>
-      <div class="brand-title">${escapeHtml(title)}</div>
-      <div class="brand-subtitle">Звіт по проходженню навчання · Знято ${new Date().toLocaleDateString('uk-UA')}</div>
-    </div>
-  </div>
-</div>
-<div class="filters" id="x-filters">
-  <div class="filter-field">
-    <label>Регіон</label>
-    <select id="x-region"><option value="">Усі регіони</option></select>
-  </div>
-  <div class="filter-field">
-    <label>Магазин</label>
-    <select id="x-store"><option value="">Усі магазини</option></select>
-  </div>
-  <div class="filter-field">
-    <label>Посада</label>
-    <select id="x-position"><option value="">Усі посади</option></select>
-  </div>
-  <div class="filter-field" style="min-width:220px;">
-    <label>Пошук за ПІБ</label>
-    <input type="text" id="x-search" placeholder="Прізвище, ім'я...">
-  </div>
-</div>
-<div class="kpi-grid" id="x-kpi"></div>
-<div class="card">
-  <h3>По регіонах</h3>
-  <p class="field-hint">Завжди всі регіони, незалежно від фільтра вище.</p>
-  <div class="table-scroll"><table class="data-table" id="x-regions"></table></div>
-</div>
-<div class="card">
-  <h3>Учасники</h3>
-  <p class="field-hint" id="x-count-hint"></p>
-  <div class="table-scroll"><table class="data-table" id="x-people"></table></div>
-</div>
-<script>
-'use strict';
-const ROWS = ${rowsJson};
-
-function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-function fmtPct(v) { return v === null || v === undefined || Number.isNaN(v) ? '—' : (Math.round(v * 10) / 10) + '%'; }
-function bucket(v) {
-  if (v === null || v === undefined || Number.isNaN(v)) return 'red';
-  if (v >= 90) return 'good'; if (v >= 70) return 'yellow'; if (v >= 40) return 'orange'; return 'red';
-}
-function progressCell(v) {
-  const pct = Math.max(0, Math.min(100, v || 0));
-  return '<div class="progress-cell"><div class="progress-bar-track"><div class="progress-bar-fill fill-' + bucket(v) + '" style="width:' + pct + '%"></div></div><div class="value">' + fmtPct(v) + '</div></div>';
-}
-function avg(arr) { return arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : null; }
-
-function stats(rows) {
-  return {
-    material: avg(rows.map((r) => r.material)),
-    test: avg(rows.map((r) => r.test)),
-    passed: rows.filter((r) => r.test >= 100).length,
-    total: rows.length,
-  };
-}
-function byRegionOf() {
-  const regions = [...new Set(ROWS.map((r) => r.region).filter(Boolean))];
-  return regions.map((region) => ({ region, ...stats(ROWS.filter((r) => r.region === region)) }))
-    .sort((a, b) => (b.test ?? -1) - (a.test ?? -1));
-}
-
-function filteredRows() {
-  const region = document.getElementById('x-region').value;
-  const store = document.getElementById('x-store').value;
-  const position = document.getElementById('x-position').value;
-  const search = document.getElementById('x-search').value.trim().toLowerCase();
-  return ROWS.filter((r) =>
-    (!region || r.region === region) &&
-    (!store || r.store === store) &&
-    (!position || r.position === position) &&
-    (!search || r.name.toLowerCase().includes(search))
-  );
-}
-
-function renderKpi(s) {
-  const tiles = [
-    ['Пройшли матеріал', fmtPct(s.material), 'accent-green'],
-    ['Середній бал тесту', fmtPct(s.test), ''],
-    ['Склали тест (100%)', s.passed + ' з ' + s.total, ''],
-  ];
-  document.getElementById('x-kpi').innerHTML = tiles.map((t) =>
-    '<div class="kpi-tile ' + t[2] + '"><div class="kpi-value">' + t[1] + '</div><div class="kpi-label">' + esc(t[0]) + '</div></div>'
-  ).join('');
-}
-function renderRegions(regions) {
-  document.getElementById('x-regions').innerHTML =
-    '<thead><tr><th>Регіон</th><th>Середній тест</th><th>Матеріал</th><th>Учасників</th></tr></thead><tbody>' +
-    (regions.map((r) => '<tr><td>' + esc(r.region) + '</td><td>' + progressCell(r.test) + '</td><td>' + progressCell(r.material) + '</td><td>' + r.total + '</td></tr>').join('')
-      || '<tr><td colspan="4" class="muted">Немає даних</td></tr>') + '</tbody>';
-}
-function renderPeople(rows) {
-  const sorted = [...rows].sort((a, b) => a.test - b.test || a.material - b.material);
-  document.getElementById('x-people').innerHTML =
-    '<thead><tr><th>ПІБ</th><th>Регіон</th><th>Магазин</th><th>Посада</th><th>Матеріал</th><th>Тест</th><th>Дата тесту</th></tr></thead><tbody>' +
-    (sorted.map((r) => '<tr><td>' + esc(r.name) + '</td><td>' + esc(r.region) + '</td><td>' + esc(r.store) + '</td><td>' + esc(r.position) + '</td><td>' + progressCell(r.material) + '</td><td>' + progressCell(r.test) + '</td><td>' + esc(r.testDate || '—') + '</td></tr>').join('')
-      || '<tr><td colspan="7" class="muted">Немає даних за цим фільтром</td></tr>') + '</tbody>';
-  document.getElementById('x-count-hint').textContent = 'Показано ' + sorted.length + ' з ' + ROWS.length + ' учасників. Відсортовано від найгіршого результату тесту.';
-}
-
-function render() {
-  const rows = filteredRows();
-  renderKpi(stats(rows));
-  renderPeople(rows);
-}
-
-function populateFilters() {
-  const regionSelect = document.getElementById('x-region');
-  const storeSelect = document.getElementById('x-store');
-  const positionSelect = document.getElementById('x-position');
-  const regions = [...new Set(ROWS.map((r) => r.region).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'uk'));
-  const positions = [...new Set(ROWS.map((r) => r.position).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'uk'));
-  regionSelect.innerHTML = '<option value="">Усі регіони</option>' + regions.map((r) => '<option value="' + esc(r) + '">' + esc(r) + '</option>').join('');
-  positionSelect.innerHTML = '<option value="">Усі посади</option>' + positions.map((p) => '<option value="' + esc(p) + '">' + esc(p) + '</option>').join('');
-  function refreshStoreOptions() {
-    const region = regionSelect.value;
-    const stores = [...new Set(ROWS.filter((r) => !region || r.region === region).map((r) => r.store).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'uk'));
-    storeSelect.innerHTML = '<option value="">Усі магазини</option>' + stores.map((s) => '<option value="' + esc(s) + '">' + esc(s) + '</option>').join('');
-  }
-  refreshStoreOptions();
-  regionSelect.addEventListener('change', () => { storeSelect.value = ''; refreshStoreOptions(); render(); });
-  storeSelect.addEventListener('change', render);
-  positionSelect.addEventListener('change', render);
-  document.getElementById('x-search').addEventListener('input', render);
-}
-
-populateFilters();
-renderRegions(byRegionOf());
-render();
-</script>
-</body></html>`;
 }
 
 /* ===================== category analysis ("Аналіз категорій") =====================
@@ -5786,17 +4688,110 @@ render();
 </body></html>`;
 }
 
+/* ===================== «Доступ»: who gets in through Feed ===================== */
+const ACCESS_FIELDS = { mag: 'Відділ', reg: 'Управління', position: 'Посада', tab: 'Таб. №', login: 'Логін Feed' };
+const ACCESS_ROLES = { admin: 'Адмін', hr: 'Регіональна команда', none: 'Без доступу' }; // 'hr' — the role code
+// «Журнал» (see AUDIT in app.py): every change on the dashboard, filterable
+// by person, section and period.
+let accessTab = 'rules';
+const auditFilter = { who: '', section: '', days: '30' };
+async function renderAuditLog() {
+  const box = document.getElementById('ac-pane-log');
+  if (!box) return;
+  const q = new URLSearchParams(Object.entries(auditFilter).filter(([, v]) => v));
+  let data;
+  try { data = await api(`/api/access-audit?${q}`); } catch (e) { box.innerHTML = `<div class="error-text">${escapeHtml(e.message)}</div>`; return; }
+  const fmtAt = (v) => new Date(v).toLocaleString('uk-UA', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const sel = (id, label, opts) => `<div class="filter-field"><label for="${id}">${label}</label><select id="${id}">${opts}</select></div>`;
+  const o = (v, t, cur) => `<option value="${escapeHtml(v)}" ${v === cur ? 'selected' : ''}>${escapeHtml(t)}</option>`;
+  box.innerHTML = `
+    <div class="filters" style="margin:0 0 12px;">
+      ${sel('au-who', 'Співробітник', o('', 'Усі', auditFilter.who) + data.people.map((p) => o(p.key, `${p.fio || p.key}${p.position ? ' · ' + p.position : ''} (${p.n})`, auditFilter.who)).join(''))}
+      ${sel('au-section', 'Розділ', o('', 'Усі', auditFilter.section) + data.sections.map((x) => o(x, x, auditFilter.section)).join(''))}
+      ${sel('au-days', 'Період', [['1', 'Сьогодні'], ['7', '7 днів'], ['30', '30 днів'], ['', 'Усе']].map(([v, t]) => o(v, t, auditFilter.days)).join(''))}
+    </div>
+    <div class="table-scroll" style="max-height:460px;"><table class="data-table"><thead><tr><th>Коли</th><th>Хто</th><th>Розділ</th><th>Дія</th><th>Деталі</th></tr></thead>
+      <tbody>${data.rows.map((r) => `<tr><td style="white-space:nowrap;">${fmtAt(r.at)}</td>
+        <td>${escapeHtml(r.fio || r.login || '')}<div class="muted">${escapeHtml(r.position || '')}</div></td>
+        <td>${escapeHtml(r.section)}</td>
+        <td class="${/Немає доступу|Невдала/.test(r.action) ? 'error-text' : ''}"><b>${escapeHtml(r.action)}</b></td>
+        <td>${escapeHtml(r.details || '')}</td></tr>`).join('') || '<tr><td class="muted" colspan="5">За цими фільтрами записів немає</td></tr>'}</tbody></table></div>
+    <div class="field-hint">Показано ${data.rows.length}${data.rows.length >= 500 ? ' останніх' : ''} записів. Записуються лише зміни: входи, оновлення з Feed, завантаження, резерв і потенційні, налаштування LH, доступ.</div>`;
+  [['au-who', 'who'], ['au-section', 'section'], ['au-days', 'days']].forEach(([id, k]) => {
+    document.getElementById(id).onchange = (e) => { auditFilter[k] = e.target.value; renderAuditLog(); };
+  });
+}
+
+async function openAccessModal() {
+  const root = document.getElementById('modal-root');
+  let data;
+  try { data = await api('/api/access'); } catch (e) { showToast(e.message, true); return; }
+  const fmtAt = (s) => (s ? new Date(s).toLocaleString('uk-UA', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '');
+  const opt = (dict, cur) => Object.entries(dict).map(([k, v]) => `<option value="${k}" ${k === cur ? 'selected' : ''}>${v}</option>`).join('');
+  const ruleRow = (r) => `<tr data-id="${r.id || ''}">
+      <td><select class="ac-role">${opt(ACCESS_ROLES, r.role || 'hr')}</select></td>
+      <td><select class="ac-field">${opt(ACCESS_FIELDS, r.field || 'position')}</select></td>
+      <td><select class="ac-op"><option value="contains" ${r.op !== 'equals' ? 'selected' : ''}>містить</option><option value="equals" ${r.op === 'equals' ? 'selected' : ''}>дорівнює</option></select></td>
+      <td><input type="text" class="ac-val" value="${escapeHtml(r.value || '')}" style="width:100%;"></td>
+      <td><input type="text" class="ac-label" value="${escapeHtml(r.label || '')}" placeholder="підпис" style="width:100%;"></td>
+      <td style="white-space:nowrap;"><button class="btn btn-primary btn-sm ac-save">Зберегти</button> ${r.id ? '<button class="btn btn-secondary btn-sm ac-del" title="Видалити правило">✕</button>' : ''}</td></tr>`;
+  root.innerHTML = `
+    <div class="modal-backdrop"><div class="modal" style="max-width:1100px;">
+      <button class="modal-close" id="ac-close">✕</button>
+      <h2>👥 Доступ</h2>
+      <div class="position-switch" id="ac-tabs">
+        <button class="position-chip ${accessTab === 'rules' ? 'active' : ''}" data-pane="rules">Правила</button>
+        <button class="position-chip ${accessTab === 'log' ? 'active' : ''}" data-pane="log">Журнал</button>
+      </div>
+      <div id="ac-pane-rules">
+      <p class="modal-subtitle">Вхід — логіном і паролем Feed. Роль визначають правила за профілем Feed: відділ, управління, посада, таб. № або логін. Якщо людина підходить під кілька правил: «Без доступу» сильніше за все (так можна закрити вхід окремій людині за таб. №), далі Адмін, далі Регіональна команда. Не підійшло жодне — доступу немає. Правила перевіряються при кожному вході.</p>
+      <h3>Правила</h3>
+      <div class="table-scroll"><table class="data-table" id="ac-rules"><thead><tr><th>Роль</th><th>Поле Feed</th><th>Умова</th><th>Значення</th><th>Підпис</th><th></th></tr></thead>
+        <tbody>${data.rules.map(ruleRow).join('')}${ruleRow({})}</tbody></table></div>
+      <div id="ac-error" class="error-text"></div>
+      </div>
+      <div id="ac-pane-log" hidden></div>
+    </div></div>`;
+  document.getElementById('ac-close').onclick = closeModal;
+  const showPane = (pane) => {
+    accessTab = pane;
+    document.querySelectorAll('#ac-tabs .position-chip').forEach((b) => b.classList.toggle('active', b.dataset.pane === pane));
+    document.getElementById('ac-pane-rules').hidden = pane !== 'rules';
+    document.getElementById('ac-pane-log').hidden = pane !== 'log';
+    if (pane === 'log') renderAuditLog();
+  };
+  document.getElementById('ac-tabs').onclick = (e) => { const b = e.target.closest('[data-pane]'); if (b) showPane(b.dataset.pane); };
+  showPane(accessTab);
+  document.getElementById('ac-rules').addEventListener('click', async (ev) => {
+    const tr = ev.target.closest('tr');
+    try {
+      if (ev.target.closest('.ac-save')) {
+        await api('/api/access-rules', { method: 'POST', body: JSON.stringify({ id: tr.dataset.id || null,
+          role: tr.querySelector('.ac-role').value, field: tr.querySelector('.ac-field').value, op: tr.querySelector('.ac-op').value,
+          value: tr.querySelector('.ac-val').value, label: tr.querySelector('.ac-label').value }) });
+        showToast('Правило збережено'); await openAccessModal();
+      } else if (ev.target.closest('.ac-del')) {
+        if (!confirm('Видалити правило?')) return;
+        await api(`/api/access-rules/${tr.dataset.id}`, { method: 'DELETE' });
+        await openAccessModal();
+      }
+    } catch (e) { document.getElementById('ac-error').textContent = e.message; }
+  });
+}
+
 /* ===================== init ===================== */
 
 function bindTopActions() {
   document.getElementById('login-submit').addEventListener('click', doLogin);
   document.getElementById('login-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
+  document.getElementById('login-user').addEventListener('keydown', (e) => { if (e.key === 'Enter') document.getElementById('login-password').focus(); });
+  document.getElementById('login-mode').addEventListener('click', toggleLoginMode);
+  document.getElementById('btn-access').addEventListener('click', openAccessModal);
   document.getElementById('btn-logout').addEventListener('click', doLogout);
   document.getElementById('btn-upload').addEventListener('click', openUploadModal);
   document.getElementById('btn-feed-sync').addEventListener('click', openFeedSyncModal);
   document.getElementById('btn-classify').addEventListener('click', openClassifyModal);
-  document.getElementById('btn-director-report').addEventListener('click', openDirectorReportView);
-  document.getElementById('btn-lesson-report').addEventListener('click', openLessonReportView);
+  document.getElementById('btn-snapshot').addEventListener('click', downloadTabSnapshot);
   document.getElementById('btn-category-analysis').addEventListener('click', openCategoryAnalysisView);
 }
 

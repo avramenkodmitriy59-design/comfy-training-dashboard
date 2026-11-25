@@ -7,7 +7,8 @@ Rules agreed with the team:
 - position levels: linear (seller, cashier, storekeeper...) < товарознавець
   (store first line) < заступник (ТП / ІТ) < директор; moving to a higher
   level is a promotion, a temporary transfer included;
-- target position: Leader Hub 1.0 -> заступник or higher, 2.0 -> директор;
+- target position: Leader Hub 1.0 -> заступник or higher, 2.0 -> директор,
+  Leader Hub БЕК (code TZ) -> товарознавець or higher;
 - a participant is matched to the history by tab number, or — when the
   participants file has none — by an exact, unique full-name match.
 """
@@ -15,7 +16,8 @@ Rules agreed with the team:
 import datetime
 import re
 
-TARGET_RANK = {"LH1": 3, "LH2": 4}
+TARGET_RANK = {"TZ": 2, "LH1": 3, "LH2": 4}
+PROGRAMS = ("LH1", "LH2", "TZ")  # TZ — Leader Hub БЕК (back office -> товарознавець)
 # programme statuses replaced by «Призначення» when the history shows the target post
 AUTO_APPOINTED_FROM = {"Сертифікований", "Кадровий резерв", "ІПР"}
 GRAD_STATUSES = {"Сертифікований", "Кадровий резерв", "ІПР", "Призначення"}
@@ -26,6 +28,12 @@ PROGRAM_STATUSES = ["Навчається", "Сертифікований", "К�
                     "Не пройшов навчання", "Відмова", "Мобілізація", "Звільнення"]
 # reserve statuses that can be set by hand on "Статуси резерву"
 # ("Призначений" / "Звільнений" always come from the employee history)
+# who can be marked «Потенційний» toward a post (short position names, see _POSITIONS)
+POTENTIAL_FROM = {
+    "TZ": {"Вантажник", "Комірник", "Касир", "Сервіс менеджер", "Продавець"},
+    "LH1": {"Продавець", "ІТ-спеціаліст", "Товарознавець"},
+    "LH2": {"Заступник з ТП", "Заступник з ІТ", "Товарознавець"},
+}
 RESERVE_MANUAL_STATUSES = ["Кадровий резерв", "Потенційний", "Пониження", "Не в резерві"]
 CURRENT_END = "2049-01-01"  # BI marks the current position with end date 2050-01-01
 
@@ -112,8 +120,9 @@ def _days_between(a, b):
 # people / parts / apps / aps / leaves / stores — see static/js/reserve.js).
 # ---------------------------------------------------------------------------
 
-GROUP_BY_RANK = {3: "Заступник", 4: "Директор"}
-GROUP_PROGRAM = {"Заступник": "LH1", "Директор": "LH2"}
+GROUP_BY_RANK = {2: "Товарознавець", 3: "Заступник", 4: "Директор"}
+GROUP_PROGRAM = {"Товарознавець": "TZ", "Заступник": "LH1", "Директор": "LH2"}
+VACANCY_GROUP_BY_RANK = {2: "Товарознавець", 3: "Заступник", 4: "Директор"}
 APPOINTMENTS_SINCE = "2024-01-01"
 LEAVES_SINCE_DAYS = 760  # enough for a rolling 12 months plus the previous year
 
@@ -176,10 +185,10 @@ def lh_dataset(conn, today=None):
         prev = None
         for r in rows:
             pos, rank = position_info(r["position"])
-            group = GROUP_BY_RANK.get(rank)
+            group = VACANCY_GROUP_BY_RANK.get(rank)
             start = r["date_start"] or ""
             prev_pos, prev_rank = position_info(prev["position"]) if prev else (None, 0)
-            prev_group = GROUP_BY_RANK.get(prev_rank) if prev else None
+            prev_group = VACANCY_GROUP_BY_RANK.get(prev_rank) if prev else None
             # someone leaves a deputy/director post: dismissed from it, or moved to another post
             if prev_group and start >= leaves_since and (
                     r["status"] == "Звільнений" or (group != prev_group)):
@@ -193,7 +202,7 @@ def lh_dataset(conn, today=None):
                 cat = "ЗП" if external else "LH" if lh else "ВП"
                 aps.append({"d": start, "y": int(start[:4]), "grp": group, "cat": cat,
                             "r": region_of.get(r["store"]), "s": r["store"], "n": r["name"]})
-                if not external:
+                if not external and group in GROUP_PROGRAM:
                     apps.append({"d": start, "y": int(start[:4]), "to": group, "frm": prev_pos,
                                  "rf": region_of.get(prev["store"]), "sf": prev["store"],
                                  "rt": region_of.get(r["store"]), "stt": r["store"], "g": lh})
@@ -201,18 +210,20 @@ def lh_dataset(conn, today=None):
 
     # statuses set by hand; "Потенційний" may be someone outside the programmes
     rstatus = {}
-    for r in conn.execute("SELECT pid, program, status, note, updated_at FROM reserve_status"):
+    for r in conn.execute("SELECT pid, program, status, note, updated_at, updated_by FROM reserve_status"):
         pid = r["pid"]
         if pid not in people:
             if pid not in history:
                 continue
             people[pid] = _person(pid, pid, None, history[pid], region_of, today)
             people[pid]["matchedBy"] = "tab"
-        rstatus[f"{pid}|{r['program']}"] = {"status": r["status"], "note": r["note"] or "", "at": r["updated_at"]}
+        rstatus[f"{pid}|{r['program']}"] = {"status": r["status"], "note": r["note"] or "", "at": r["updated_at"], "by": r["updated_by"] or ""}
 
+    rnotes = {f"{r['pid']}|{r['program']}": {"note": r["note"], "at": r["updated_at"], "by": r["updated_by"] or ""}
+              for r in conn.execute("SELECT pid, program, note, updated_at, updated_by FROM reserve_notes")}
     stores = [[r["region"], r["store"]] for r in conn.execute("SELECT region, store FROM store_regions ORDER BY region, store")]
     return {"today": today, "people": people, "parts": parts, "apps": apps, "aps": aps, "leaves": leaves,
-            "stores": stores, "rstatus": rstatus}
+            "stores": stores, "rstatus": rstatus, "rnotes": rnotes}
 
 
 _LATIN_TO_CYR = str.maketrans("aceiopxyk", "асеіорхук")
@@ -335,3 +346,13 @@ def _person(pid, tab, name, rows, region_of, today):
             "cur_store": last["store"], "cur_reg": region_of.get(last["store"]), "hire": hire, "ev": ev,
             "max_rank": max_rank, "demoted": demoted, "dismissed": dismissed_on,
             "last_pos": position_info(held["position"])[0], "last_store": held["store"]}
+
+
+def program_code(value):
+    """Programme from a file / request: «LH 1.0», «LH2», «LH БЕК» / «LHB» / «TZ»."""
+    v = str(value or "").upper().replace(" ", "").replace(".0", "")
+    if v in PROGRAMS:
+        return v
+    if "БЕК" in v or "BEK" in v or "BACK" in v or v in ("LHB", "LHБ"):
+        return "TZ"
+    return "LH2" if "2" in v else "LH1"

@@ -134,6 +134,62 @@ CREATE TABLE IF NOT EXISTS reserve_status (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (pid, program)
 );
+-- access through the Feed login: rules (first match by priority wins) and a login log
+CREATE TABLE IF NOT EXISTS access_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    priority INTEGER NOT NULL DEFAULT 100,
+    role TEXT NOT NULL,            -- admin | hr | none
+    field TEXT NOT NULL,           -- mag | reg | position | tab | login
+    op TEXT NOT NULL DEFAULT 'contains',  -- contains | equals
+    value TEXT NOT NULL,
+    label TEXT
+);
+CREATE TABLE IF NOT EXISTS login_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    login TEXT,
+    tab TEXT,
+    fio TEXT,
+    position TEXT,
+    mag TEXT,
+    reg TEXT,
+    role TEXT,
+    result TEXT
+);
+-- «Журнал»: every change made on the dashboard (logins, Feed syncs, uploads,
+-- reserve/potentials, LH settings, access rules...) — who, when, what.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    login TEXT,
+    tab TEXT,
+    fio TEXT,
+    position TEXT,
+    mag TEXT,
+    reg TEXT,
+    section TEXT NOT NULL,
+    action TEXT NOT NULL,
+    details TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
+-- comments on people in the reserve (anyone with access may leave one;
+-- the manual status itself is admin-only, see reserve_status)
+CREATE TABLE IF NOT EXISTS reserve_notes (
+    pid TEXT NOT NULL,
+    program TEXT NOT NULL,
+    note TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT,
+    PRIMARY KEY (pid, program)
+);
+-- admin-only comment on a programme participant (pid|program|year) — never
+-- sent to the regional team
+CREATE TABLE IF NOT EXISTS admin_notes (
+    key TEXT PRIMARY KEY,
+    note TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    updated_by TEXT
+);
 CREATE TABLE IF NOT EXISTS store_regions (
     store TEXT PRIMARY KEY,
     region TEXT NOT NULL
@@ -396,6 +452,31 @@ def init_db():
     trainee_cols = [r["name"] for r in conn.execute("PRAGMA table_info(trainees)").fetchall()]
     if trainee_cols and "success" not in trainee_cols:
         conn.execute("ALTER TABLE trainees ADD COLUMN success INTEGER")
+    rs_cols = [r["name"] for r in conn.execute("PRAGMA table_info(reserve_status)").fetchall()]
+    if rs_cols and "updated_by" not in rs_cols:
+        conn.execute("ALTER TABLE reserve_status ADD COLUMN updated_by TEXT")
+    # the login log became part of the audit log («Вхід» / «Feed»)
+    if not conn.execute("SELECT 1 FROM audit_log LIMIT 1").fetchone():
+        roles = {"admin": "Адмін", "hr": "Регіональна команда"}
+        for r in conn.execute("SELECT * FROM login_log ORDER BY id").fetchall():
+            if r["role"] == "feed":
+                sec, act, det = "Feed", "Автооновлення", (r["result"] or "").removeprefix("автооновлення ")
+            elif r["role"]:
+                sec, act, det = "Вхід", "Вхід", f"{roles.get(r['role'], r['role'])} · {r['result'] or ''}"
+            else:
+                sec, act, det = "Вхід", "Немає доступу", r["result"]
+            conn.execute("INSERT INTO audit_log (at, login, tab, fio, position, mag, reg, section, action, details) "
+                         "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                         (r["at"], r["login"], r["tab"], r["fio"], r["position"], r["mag"], r["reg"], sec, act, det))
+    # default access rules (agreed 2026-11-25); edited later on the «Доступ» page
+    if not conn.execute("SELECT 1 FROM access_rules LIMIT 1").fetchone():
+        conn.executemany(
+            "INSERT INTO access_rules (priority, role, field, op, value, label) VALUES (?,?,?,?,?,?)",
+            [(10, "admin", "mag", "equals", "Відділ навчання роздрібу", "Відділ навчання роздрібу"),
+             (20, "hr", "reg", "contains", "розвитку персоналу та бренду роботодавця", "Управління персоналом"),
+             (30, "hr", "position", "contains", "менеджер з персоналу", "Регіональна команда · HR"),
+             (31, "hr", "position", "contains", "начальник регіонального управління продажу", "Регіональна команда · Регіонал"),
+             (32, "hr", "position", "contains", "керівник групи ІТ", "Регіональна команда · Тім лід")])
     _renormalize_aep_names(conn)
     for position, segment, first_line in DEFAULT_POSITIONS:
         conn.execute(
