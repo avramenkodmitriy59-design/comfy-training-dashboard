@@ -19,7 +19,7 @@ import reserve
 from feed_sync import (
     FeedClient, FeedError, fetch_attestation_reports, fetch_overall_report, fetch_sellers_report, fetch_trainees,
     trainee_success, dismissed_during_internship, trainee_failure_reasons, TRAINEE_TYPE_LABELS,
-    relative_quarter_period, region_probe as feed_region_probe,
+    relative_quarter_period, allowed_regions as feed_allowed_regions,
 )
 from aggregate import (
     aggregate, clean_row, detect_attestation_stream, distribution, ATTESTATION_STREAMS,
@@ -192,6 +192,28 @@ def current_user_label():
     return u.get("short") or u.get("fio") or ("адмін (пароль)" if current_role() == "admin" else "")
 
 
+# ---- the regional team's regions (from Feed at sign-in, see login) ----
+def region_key(name):
+    """One key for a region across sources: Feed / LMS write «Київський
+    Правий», the store reference «Київ Правобережний»."""
+    k = " ".join(str(name or "").lower().replace("регіон", "").split())
+    return {"київський правий": "київ правобережний", "київський лівий": "київ лівобережний"}.get(k, k)
+
+
+def user_regions():
+    """Region keys the regional team member is limited to, or None (admins,
+    or nothing known — the whole network)."""
+    if current_role() != "hr":
+        return None
+    regs = (session.get("user") or {}).get("regions")
+    return {region_key(x) for x in regs} if regs else None
+
+
+def region_allowed(name):
+    keys = user_regions()
+    return keys is None or region_key(name) in keys
+
+
 def hr_allowed(method, path):
     if method == "GET":
         return path in HR_GET
@@ -303,16 +325,23 @@ def login():
         _log_login(conn, prof, None, "немає доступу")
         conn.close()
         return jsonify({"ok": False, "error": "Немає доступу до дашборда. Зверніться до Відділу навчання роздрібу"}), 403
-    _log_login(conn, prof, role, label)
+    regions = None
+    if role == "hr":
+        # the regions Feed lets this person see; all of them (or none
+        # known) — no limit, e.g. the central office
+        try:
+            regions = feed_allowed_regions(client)
+        except FeedError:
+            regions = None
+        n_all = conn.execute("SELECT COUNT(DISTINCT region) AS n FROM store_regions").fetchone()["n"] or 9
+        if not regions or len({region_key(x) for x in regions}) >= n_all:
+            regions = None
+    _log_login(conn, prof, role, (label or "") + (f" · регіони: {', '.join(regions)}" if regions else ""))
     conn.close()
     session.clear()
     session.update(authenticated=True, role=role, at=time.time(),
-                   user={k: prof.get(k) for k in ("login", "tab", "fio", "short", "position", "mag")})
+                   user={**{k: prof.get(k) for k in ("login", "tab", "fio", "short", "position", "mag")}, "regions": regions})
     session.permanent = True
-    if role == "hr":
-        # find out what Feed says about the regions this person may see (to
-        # limit the regional team to its region) — logged, in the background
-        threading.Thread(target=_region_probe_run, args=(client, dict(prof)), daemon=True).start()
     started = maybe_start_feed_auto(client, {**{k: prof.get(k) for k in ("login", "tab", "fio", "position", "mag", "reg")}, "role": role})
     return jsonify({"ok": True, "role": role, "feedAuto": started})
 
@@ -360,6 +389,10 @@ def access_audit():
     conn = db.get_db()
     rows = [dict(r) for r in conn.execute(
         f"SELECT * FROM audit_log {'WHERE ' + ' AND '.join(where) if where else ''} ORDER BY id DESC LIMIT 500", params)]
+    for row in rows:  # the 0.0.17 probe rows: keep only what matters — the regions
+        if row["action"] == "Регіони у Feed":
+            m = re.search(r"structure \(\d+\): ([^;]*)", row["details"] or "")
+            row["action"], row["details"] = "Регіони", (m.group(1).strip() if m else "Feed не повернув переліку регіонів")
     people = [dict(r) for r in conn.execute(
         "SELECT COALESCE(login, fio) AS key, MAX(fio) AS fio, MAX(position) AS position, COUNT(*) AS n "
         "FROM audit_log GROUP BY COALESCE(login, fio) ORDER BY MAX(fio)")]
@@ -1052,13 +1085,6 @@ def _prev_quarter_pending(conn):
     return not r or r["rows"] != y * 10 + q
 
 
-def _region_probe_run(client, prof):
-    try:
-        audit("Feed", "Регіони у Feed", feed_region_probe(client), who=prof)
-    except Exception as e:  # noqa: BLE001
-        app.logger.warning("region probe failed: %s", e)
-
-
 def maybe_start_feed_auto(client, who):
     # admins only: a regional team login sees just its part of the network in
     # Feed (checked 2026-11-26 — every report came back partial), so its run
@@ -1299,6 +1325,8 @@ def employees_search():
         (as_of,),
     ) if (not store or r["store"] == store) and (not pot_from or reserve.position_info(r["position"])[0] in pot_from) and (
         len(q) < 2 or r["tab"] == q or (words and all(w in reserve.name_key(r["name"]) for w in words)))]
+    if user_regions() is not None:  # regional team: people of its regions only
+        rows = [r for r in rows if region_allowed(r["region"])]
     if store:  # the store's team: senior posts first
         rows.sort(key=lambda r: (-(reserve.position_info(r["position"])[1] or 0), r["name"] or ""))
         rows = rows[:300]
@@ -1425,8 +1453,22 @@ def _auto_potential(conn, pid, prog):
     return bool(key) and any(not (r["tab"] or "").strip() and reserve.name_key(r["name"]) == key for r in rows)
 
 
+def _person_region(conn, pid):
+    """Where the person works now (store reference region) — or, for a
+    participant not found in the history, their region from the file."""
+    if pid.startswith("p") and pid[1:].isdigit():
+        r = conn.execute("SELECT region FROM lh_participants WHERE id = ?", (int(pid[1:]),)).fetchone()
+        return r["region"] if r else None
+    r = conn.execute("SELECT sr.region FROM employee_history h LEFT JOIN store_regions sr ON sr.store = h.store "
+                     "WHERE h.tab = ? ORDER BY h.date_start DESC LIMIT 1", (pid,)).fetchone()
+    return r["region"] if r else None
+
+
 def _hr_reserve_check(conn, pid, prog, status):
-    """HR may add / keep / remove potentials — nothing else in the reserve."""
+    """HR may add / keep / remove potentials — nothing else in the reserve —
+    and only for people working in their own regions."""
+    if user_regions() is not None and not region_allowed(_person_region(conn, pid)):
+        return "Змінювати потенційних можна лише у своїх регіонах"
     cur = conn.execute("SELECT status FROM reserve_status WHERE pid = ? AND program = ?", (pid, prog)).fetchone()
     cur = cur["status"] if cur else None
     if status == "Потенційний" and cur in (None, "Потенційний", "Не в резерві"):
@@ -1660,6 +1702,9 @@ def trainees_list():
     ).fetchall()
     conn.close()
     out = []
+    keys = user_regions()
+    if keys is not None:  # regional team: its regions only
+        rows = [r for r in rows if region_key(r["region"]) in keys]
     for r in rows:
         e = json.loads(r["raw_json"])
         reasons = []
@@ -3101,6 +3146,19 @@ def _build_where(conn, period_ids, args):
     if store:
         where.append("store = ?")
         params.append(store)
+    # regional team: only its regions (compare=1 — the «за регіонами» charts,
+    # which get the network split by region only, see summary)
+    keys = user_regions()
+    if keys is not None and not args.get("compare"):
+        if region:
+            if region_key(region) not in keys:
+                where.append("1 = 0")
+        else:
+            names = [r["region"] for r in conn.execute(
+                f"SELECT DISTINCT region FROM details WHERE period_id IN ({','.join('?' for _ in period_ids)})", list(period_ids))
+                if region_key(r["region"]) in keys] if period_ids else []
+            where.append(f"region IN ({','.join('?' for _ in names)})" if names else "1 = 0")
+            params.extend(names)
     if position:
         where.append("position = ?")
         params.append(position)
@@ -3188,6 +3246,9 @@ def summary():
         totals, by_region, by_store, by_position = aggregate(rows)
         dist = distribution(rows)
 
+    if user_regions() is not None and request.args.get("compare"):
+        # regional team: other regions only as numbers per region, for comparison
+        return jsonify({"periodId": period["id"], "byRegion": by_region})
     response = {
         "periodId": period["id"],
         "totals": totals,

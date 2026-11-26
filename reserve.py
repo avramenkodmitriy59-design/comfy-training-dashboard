@@ -51,6 +51,17 @@ _POSITIONS = [
     ("фахівець по роботі з комп", "ІТ-спеціаліст", 1),
     ("менеджер в роздрібній торгівлі", "Сервіс менеджер", 1),
     ("фахівець дрібної побутової техніки", "Продавець", 1),
+    # short names from the Leader Hub participants file — the same posts as
+    # the HR titles above: «ІТ-лід» = заступник з ІТ-сервісів, «ІТ-спеціаліст» /
+    # «Фахівець з ІТ» = фахівець по роботі з комп'ютерними системами (checked
+    # against the employee history at the stream start, 2026-11-26)
+    ("заступник з тп", "Заступник з ТП", 3),
+    ("заступник з іт", "Заступник з ІТ", 3),
+    ("іт-лід", "Заступник з ІТ", 3),
+    ("іт лід", "Заступник з ІТ", 3),
+    ("іт-спеціаліст", "ІТ-спеціаліст", 1),
+    ("іт спеціаліст", "ІТ-спеціаліст", 1),
+    ("фахівець з іт", "ІТ-спеціаліст", 1),
 ]
 
 # positions whose vacancies the ВП/ЗП KPI counts (rotations — same position,
@@ -174,7 +185,9 @@ def lh_dataset(conn, today=None):
         dz = p["dz"]
         parts.append({
             "id": p["id"], "pid": pid, "prog": p["program"], "year": p["year"], "reg": p["region"], "store": p["store"],
-            "pos_in": p["position"], "test": p["test"], "dz": f"{dz:g}" if dz is not None else "", "dzp": dz,
+            # one name per post («ІТ-лід» / «Заступник з ІТ», «ІТ-спеціаліст» /
+            # «Фахівець по роботі з комп'ютерними системами»...)
+            "pos_in": position_info(p["position"])[0] if p["position"] else p["position"], "test": p["test"], "dz": f"{dz:g}" if dz is not None else "", "dzp": dz,
             "status": status, "statusFile": status_file, "passed1": bool(p["passed1"]) or grad, "grad": grad, "appointed": appointed,
             "work": person["work"],
         })

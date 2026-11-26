@@ -149,30 +149,17 @@ class FeedClient:
         }
 
 
-def region_probe(client):
-    """What Feed tells about the regions a person may see (for limiting the
-    regional team to its region). Only names and region-related fields are
-    kept — never other personal data from the profile. Returns a short text."""
-    parts = []
-    try:
-        data = client.post("feed/settings/getSettings", {"url": client.base_url + "feed/"})
-        info = json.loads(base64.b64decode(data)).get("userInfo") or {}
-        regish = {k: v for k, v in info.items() if any(h in k.lower() for h in ("reg", "mag", "shop", "region"))
-                  and isinstance(v, (str, int, float, list)) and len(json.dumps(v, ensure_ascii=False)) < 300}
-        parts.append("профіль: " + json.dumps(regish, ensure_ascii=False))
-    except Exception as e:  # noqa: BLE001
-        parts.append(f"профіль: помилка {e}")
-    try:
-        init = client.post("feed/schedule-results/init-report", _report_filter("current_quarter")) or {}
-        parts.append("фільтр звіту, ключі: " + ", ".join(sorted(init.keys())) if isinstance(init, dict) else "фільтр звіту: не словник")
-        for k, v in (init.items() if isinstance(init, dict) else []):
-            if k in ("schedule", "positions", "att_periods") or not isinstance(v, list) or not v:
-                continue
-            names = [str(x.get("name") or x.get("title") or x.get("label") or x.get("text") or "") if isinstance(x, dict) else str(x) for x in v]
-            parts.append(f"{k} ({len(v)}): " + ", ".join(n for n in names[:25] if n))
-    except Exception as e:  # noqa: BLE001
-        parts.append(f"фільтр звіту: помилка {e}")
-    return "; ".join(parts)[:1500]
+def allowed_regions(client):
+    """Regions Feed lets this person see — the «structure» list of the
+    report filter (Feed narrows it to the person's rights). Names as Feed
+    writes them (same as in the reports)."""
+    init = client.post("feed/schedule-results/init-report", _report_filter("current_quarter")) or {}
+    out = []
+    for x in (init.get("structure") or []) if isinstance(init, dict) else []:
+        name = str((x.get("name") or x.get("title") or x.get("label") or x.get("text") or "") if isinstance(x, dict) else x).strip()
+        if name and name not in out:
+            out.append(name)
+    return out
 
 
 # Same filter the "Звіт по заняттях" page sends: all regions/stores/

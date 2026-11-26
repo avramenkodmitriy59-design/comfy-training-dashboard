@@ -28,7 +28,7 @@ let D, PEOPLE, ROOT, HOOKS;
 const TABS = ['reserve', 'lh1', 'lh2', 'lhb', 'pot'];
 // tab -> programme code (TZ — Leader Hub БЕК, target post Товарознавець)
 const TAB_PROG = { lh1: 'LH1', lh2: 'LH2', lhb: 'TZ' };
-const state = { tab: 'reserve', year: '', reg: '', store: '', pos: '', prog: '', status: '', q: '', rstat: '', rq: '', rview: '', stView: 'prog', workOnly: true, resTo: 'Заступник', apTo: 'Заступник', covTo: 'Заступник', covOpen: false, potStale: false, potWas: false };
+const state = { tab: 'reserve', year: '', reg: '', store: '', pos: '', prog: '', status: '', q: '', rstat: '', rq: '', rview: '', stView: 'prog', workOnly: true, resTo: 'Заступник', apTo: 'Заступник', covTo: 'Заступник', covOpen: false, potStale: false, potWas: '', potTo: '' };
 let END = {}, START = {}; // stream dates: programme + year -> ISO date
 const PROG = { LH1: 'LH 1.0', LH2: 'LH 2.0', TZ: 'LH БЕК' };
 const PROG_FULL = { LH1: 'Leader Hub 1.0', LH2: 'Leader Hub 2.0', TZ: 'Leader Hub БЕК' };
@@ -192,6 +192,39 @@ function stackBars(rows, dict, keys, opts = {}) {
   if (!rows.length) box.append(el('div', { class: 'empty', text: 'Немає даних за вибраними фільтрами' }));
   return box;
 }
+// line chart over streams, 0–100%: one line per series, value labels at the points
+function lineChart(cats, series) {
+  const W = 560, H = 260, L = 44, R = 70, T = 14, B = 34;
+  const x = (i) => (cats.length === 1 ? (L + W - R) / 2 : L + i * ((W - L - R) / (cats.length - 1)));
+  const y = (v) => T + (1 - v) * (H - T - B);
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, width: '100%', class: 'line-chart', role: 'img' });
+  [0, 0.5, 1].forEach((g) => {
+    svg.append(svgEl('line', { x1: L, x2: W - R + 30, y1: y(g), y2: y(g), stroke: 'var(--color-border)' }));
+    const t = svgEl('text', { x: L - 8, y: y(g) + 4, 'text-anchor': 'end', class: 'lc-axis' }); t.textContent = `${g * 100}%`; svg.append(t);
+  });
+  cats.forEach((c, i) => {
+    svg.append(svgEl('line', { x1: x(i), x2: x(i), y1: T, y2: H - B, stroke: 'var(--color-border)', 'stroke-dasharray': '2 3' }));
+    const t = svgEl('text', { x: x(i), y: H - B + 20, 'text-anchor': 'middle', class: 'lc-cat' }); t.textContent = c; svg.append(t);
+  });
+  series.forEach((s) => {
+    const pts = s.vals.map((v, i) => (v == null ? null : [x(i), y(v)])).filter(Boolean);
+    if (pts.length > 1) svg.append(svgEl('path', { d: pts.map((p, j) => `${j ? 'L' : 'M'}${p[0]},${p[1]}`).join(' '), fill: 'none', stroke: s.c, 'stroke-width': 2.5 }));
+  });
+  // per stream: the value labels sorted top-down and spread at least 14px apart
+  cats.forEach((cat, i) => {
+    const items = series.map((s) => ({ s, v: s.vals[i] })).filter((it) => it.v != null).map((it) => Object.assign(it, { py: y(it.v), ly: y(it.v) + 4 }))
+      .sort((a, b) => a.ly - b.ly);
+    items.forEach((it, j) => { if (j && it.ly < items[j - 1].ly + 14) it.ly = items[j - 1].ly + 14; });
+    const over = items.length ? items[items.length - 1].ly - (H - B - 2) : 0;
+    if (over > 0) items.forEach((it) => { it.ly -= over; });
+    items.forEach(({ s, v, py, ly }) => {
+      svg.append(svgEl('circle', { cx: x(i), cy: py, r: 5, fill: s.c, tip: () => [el('b', { text: `${cat} · ${s.label}` }), el('div', { text: fmtPct(v) })] }));
+      const t = svgEl('text', { x: x(i) + 9, y: ly, class: 'lc-val', fill: s.c }); t.textContent = fmtPct(v); svg.append(t);
+    });
+  });
+  return el('div', { class: 'line-chart-wrap' }, svg);
+}
+
 function donut(parts, center, sub) {
   const tot = parts.reduce((a, p) => a + p.n, 0), R = 86, r = 54, cx = 90, cy = 90;
   const svg = svgEl('svg', { viewBox: '0 0 180 180', width: '100%', role: 'img', 'aria-label': center });
@@ -365,13 +398,13 @@ function renderReserve(root) {
     const p = potRows(GRP_PROG[grp]);
     const a = AV_BY[grp];
     // two halves: reserve | potentials, each opens its own list
-    const half = (v, label, tipKey, fn) => el('button', { type: 'button', class: 'kpi-half', onclick: fn },
-      el('div', { class: 'kpi-value', text: String(v) }), el('div', { class: 'kpi-label' + (tipKey ? ' has-tip' : ''), text: label, tip: tipKey ? metTip(tipKey) : null }));
+    const half = (v, label, tipKey, fn, badge) => el('button', { type: 'button', class: 'kpi-half', onclick: fn },
+      el('div', { class: 'kpi-value', text: String(v) }), el('div', { class: 'kpi-label' + (tipKey ? ' has-tip' : ''), text: label, tip: tipKey ? metTip(tipKey) : null }), badge);
     return el('div', { class: 'kpi-tile kpi-split' },
       el('div', { class: 'kpi-split-title', text: `${{ 'Товарознавець': '🟠', 'Заступник': '🟢', 'Директор': '🟣' }[grp]} Доступно на ${GRP_TO[grp]}` }),
       el('div', { class: 'kpi-halves' },
-        half(a.length, 'Кадровий резерв', 'avail', () => openAvailable(grp, a)),
-        half(p.length, 'Потенційні', null, () => openPotAvailable(p, grp))),
+        half(a.length, 'Кадровий резерв', 'avail', () => openAvailable(grp, a), goneBadge(GRP_PROG[grp], GRP_TO[grp], 'res')),
+        half(p.length, 'Потенційні', null, () => openPotAvailable(p, grp), goneBadge(GRP_PROG[grp], GRP_TO[grp], 'pot'))),
       el('div', { class: 'kpi-sub', text: 'працюють зараз · натисніть для переліку' }));
   };
   const col = (...t) => el('div', { class: 'kpi-col' }, ...t);
@@ -386,13 +419,18 @@ function renderReserve(root) {
   root.append(renderTurnover(base));
   const grid = el('div', { class: 'grid-2' });
   const aRows = AV_BY[state.resTo] || a1;
+  const pRows = potRows(GRP_PROG[state.resTo] || 'LH1'); // potentials toward the same post
   const byReg = !state.reg;
-  const keys = uniqSorted(aRows.map((x) => byReg ? x.fReg : x.fStore));
-  const AV = { 'Кадровий резерв': { c: C.green } };
-  const avChart = stackBars(keys.map((k) => { const g = aRows.filter((x) => (byReg ? x.fReg : x.fStore) === k); return { label: k, segs: { 'Кадровий резерв': g.map((x) => person(x.pid).name) } }; })
-    .sort((a, b) => b.segs['Кадровий резерв'].length - a.segs['Кадровий резерв'].length), AV, Object.keys(AV));
+  const where = (x) => (byReg ? x.fReg : x.fStore);
+  const keys = uniqSorted(aRows.concat(pRows).map(where));
+  const AV = { 'Кадровий резерв': { c: C.green }, 'Потенційні': { c: C.yellow, ink: '#1f2228' } };
+  const avChart = stackBars(keys.map((k) => ({ label: k, segs: {
+    'Кадровий резерв': aRows.filter((x) => where(x) === k).map((x) => person(x.pid).name),
+    'Потенційні': pRows.filter((x) => where(x) === k).map((x) => person(x.pid).name) } }))
+    .sort((a, b) => (b.segs['Кадровий резерв'].length + b.segs['Потенційні'].length) - (a.segs['Кадровий резерв'].length + a.segs['Потенційні'].length)
+      || b.segs['Кадровий резерв'].length - a.segs['Кадровий резерв'].length), AV, Object.keys(AV));
   grid.append(card('available', ['🧩 ', el('span', { class: 'has-tip', text: 'Доступний кадровий резерв', tip: metTip('avail') })],
-    `Хто працює зараз і готовий до посади ${GRP_TO[state.resTo]} (${PROG[GRP_PROG[state.resTo]]}). ${byReg ? 'По регіонах' : 'По магазинах регіону'}, за поточним місцем роботи. Наведіть на смугу, щоб побачити ПІБ.`,
+    `Хто працює зараз і готовий до посади ${GRP_TO[state.resTo]} (${PROG[GRP_PROG[state.resTo]]}) — кадровий резерв, і потенційні на цю посаду (ІПР / Сертифіковані та відмічені вручну). ${byReg ? 'По регіонах' : 'По магазинах регіону'}, за поточним місцем роботи. Наведіть на смугу, щоб побачити ПІБ.`,
     el('div', { class: 'seg-row' }, seg([['Товарознавець', 'Товарознавець'], ['Заступник', 'Заступник'], ['Директор', 'Директор']], state.resTo, (v) => state.resTo = v)),
     el('div', { class: 'legend' }, Object.keys(AV).map((k) => el('span', {}, el('i', { style: `background:${AV[k].c}` }), k))), avChart));
   grid.append(renderInternal());
@@ -402,6 +440,7 @@ function renderReserve(root) {
   root.append(renderBench(base));
   root.append(...renderDonors());
   root.append(renderStatusTable(statusEntries()));
+  root.append(renderGoneBlock());
 }
 
 // coverage table rows (region / store level): reserve + potentials vs vacancies on one post
@@ -917,19 +956,22 @@ function renderProgram(root, prog) {
     T('conv', 'Конверсія', (r) => fmtPct(r.conv), { num: true, sortv: (r) => r.conv, cell: (r) => rateCell(r.conv), tip: 'conv' }),
     T('ret', 'Утримання', (r) => fmtPct(r.ret), { num: true, sortv: (r) => r.ret, cell: (r) => rateCell(r.ret), tip: 'ret' }),
   ], sr, { sort: 'prog', dir: -1, total: () => ({ r: 'Разом', n: tot.n, p1: tot.p1, g: tot.g, cert: fmtPct(tot.cert), prog: fmtPct(tot.prog), conv: fmtPct(tot.conv), ret: fmtPct(tot.ret) }) });
-  if (isL1 && !state.year && new Set(base.map((x) => x.year)).size > 1) {
+  // streams side by side: region / store filters apply, the year filter doesn't
+  {
+    const cb = all.filter((x) => (!state.reg || x.reg === state.reg) && (!state.store || x.store === state.store));
+    const cr = [...new Set(cb.map((x) => x.year))].sort().map((y) => Object.assign({ y }, metrics(cb.filter((x) => x.year === y))));
     const cbox = el('div');
-    root.append(card(prog + '-cohorts', '📅 Порівняння потоків', null, cbox));
-    const cr = [...new Set(base.map((x) => x.year))].sort().map((y) => Object.assign({ y }, metrics(base.filter((x) => x.year === y))));
     makeTable(cbox, [
-      T('y', 'Потік', (r) => r.y), T('n', 'Учасників', (r) => r.n, { num: true, sortv: (r) => r.n }), T('g', 'Завершили успішно', (r) => r.g, { num: true, sortv: (r) => r.g }),
-      T('cert', 'Успішність сертифікації', (r) => fmtPct(r.cert), { num: true, sortv: (r) => r.cert, cell: (r) => rateCell(r.cert), tip: 'cert' }),
-      T('prog', 'Успішність програми', (r) => fmtPct(r.prog), { num: true, sortv: (r) => r.prog, cell: (r) => rateCell(r.prog), tip: 'prog' }),
+      T('y', 'Потік', (r) => r.y), T('n', 'Учасників', (r) => r.n, { num: true, sortv: (r) => r.n }), T('g', 'Успішно', (r) => r.g, { num: true, sortv: (r) => r.g }),
+      T('cert', 'Сертифікація', (r) => fmtPct(r.cert), { num: true, sortv: (r) => r.cert, cell: (r) => rateCell(r.cert), tip: 'cert' }),
+      T('prog', 'Програма', (r) => fmtPct(r.prog), { num: true, sortv: (r) => r.prog, cell: (r) => rateCell(r.prog), tip: 'prog' }),
       T('conv', 'Конверсія', (r) => fmtPct(r.conv), { num: true, sortv: (r) => r.conv, cell: (r) => rateCell(r.conv), tip: 'conv' }),
       T('ret', 'Утримання', (r) => fmtPct(r.ret), { num: true, sortv: (r) => r.ret, cell: (r) => rateCell(r.ret), tip: 'ret' }),
-      T('speed', 'Швидкість, дн.', (r) => r.speed, { num: true, sortv: (r) => r.speed, tip: 'speed' }),
-      T('sh6', 'Призначені за 6 міс', (r) => fmtShare(r.sh6), { num: true, sortv: (r) => r.sh6.v, cell: (r) => el('span', { class: 'cell ' + cellCls(r.sh6.v), text: fmtShare(r.sh6) }), tip: 'speed6' }),
-    ], cr.map((r) => { const sr = speedRows(base.filter((x) => x.year === r.y && x.grad)); return Object.assign(r, { speed: speedMedian(sr), sh6: speedShare(sr) }); }), { sort: 'y', dir: 1 });
+    ], cr, { sort: 'y', dir: 1 });
+    const SER = [['prog', 'Успішність програми', C.green], ['cert', 'Успішність сертифікації', C.violet], ['conv', 'Конверсія', C.yellow], ['ret', 'Утримання', C.blue]];
+    root.append(card(prog + '-cohorts', '📅 Порівняння потоків', 'Фільтри регіону й магазину діють; фільтр року — ні.',
+      el('div', { class: 'cohort-grid' }, cbox, el('div', {}, lineChart(cr.map((r) => String(r.y)), SER.map(([k, label, c]) => ({ label, c, vals: cr.map((r) => r[k]) }))),
+        el('div', { class: 'legend center' }, SER.map(([, label, c]) => el('span', {}, el('i', { style: `background:${c}` }), label)))))));
   }
 
   // participants
@@ -944,10 +986,15 @@ function renderProgram(root, prog) {
   if (!regsP.includes(pf.reg)) pf.reg = ''; if (!storesP.includes(pf.store)) pf.store = ''; if (!yearsP.includes(pf.year)) pf.year = '';
   if (!pstP.includes(pf.pst)) pf.pst = ''; if (!curP.includes(pf.cur)) pf.cur = '';
   const pRows = rows0.filter((x) => (!pf.reg || x.here.reg === pf.reg) && (!pf.store || x.here.store === pf.store) && (!pf.year || String(x.year) === pf.year)
-    && (!pf.pst || x.status === pf.pst) && (!pf.cur || x.cur === pf.cur));
+    && (!pf.pst || x.status === pf.pst) && (!pf.cur || x.cur === pf.cur)
+    && (!pf.q || person(x.pid).name.toLowerCase().includes(pf.q.toLowerCase()) || person(x.pid).tab === pf.q));
+  let qt;
+  const pq = el('input', { type: 'search', class: 'search-input', id: 'pt-q', placeholder: 'ПІБ або таб. номер', value: pf.q,
+    oninput: (ev) => { clearTimeout(qt); qt = setTimeout(() => { pf.q = ev.target.value.trim(); render(); const n = ROOT.querySelector('#pt-q'); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }, 300); } });
   const psel = (label, k, all, items) => el('select', { 'aria-label': label, onchange: (ev) => { pf[k] = ev.target.value; if (k === 'reg') pf.store = ''; render(); } },
     el('option', { value: '', text: all }), items.map((v) => el('option', { value: v, text: v, selected: v === pf[k] || null })));
   const ptools = el('div', { class: 'filters-inline part-tools' },
+    ff('ПІБ працівника', pq, 'wide'),
     ff('Регіон', psel('Регіон', 'reg', 'Усі регіони', regsP)), ff('Магазин', psel('Магазин', 'store', 'Усі магазини', storesP), 'wide'), ff('Рік (потік)', psel('Потік', 'year', 'Усі роки', yearsP)),
     ff('Статус у програмі', psel('Статус у програмі', 'pst', 'Усі статуси', pstP)), ff('Статус поточний', psel('Статус поточний', 'cur', 'Усі статуси', curP), 'wide'));
   const pbox = el('div');
@@ -966,9 +1013,9 @@ function renderProgram(root, prog) {
     T('store', 'Магазин', (r) => r.here.store || ''),
     // admin-only comment (separate from the reserve's shared one; see /api/admin-note)
     admin ? T('note', 'Коментар', (r) => (adminNote(r) || {}).note || '', { cell: (r) => { const n = adminNote(r); return editableNote(n ? n.note : '', n, (v) => HOOKS.setAdminNote(r, v)); }, wrap: true }) : null,
-  ].filter(Boolean), pRows, { onRow: (r) => openPerson(r.pid), sort: 'status', dir: 1, tall: true });
+  ].filter(Boolean), pRows, { onRow: (r) => openPerson(r.pid), sort: 'status', dir: 1, tall: true, cls: 'rs-table' });
 }
-const partState = { reg: '', store: '', year: '', pst: '', cur: '' };
+const partState = { q: '', reg: '', store: '', year: '', pst: '', cur: '' };
 // a participant's status now, in the reserve's words
 function partCurStatus(x) {
   const o = resStatus(x), p = person(x.pid);
@@ -987,34 +1034,125 @@ function partWhere(x) {
 }
 const adminNote = (x) => (D.adminNotes || {})[`${x.pid}|${x.prog}|${x.year}`];
 
+// potentials who left the company within a month (by the employee history)
+const GONE_DAYS = 31;
+const wasPotential = (e) => (e.manual && e.manual.status === 'Потенційний') || (e.last && AUTO_POTENTIAL.has(e.last.status));
+// in the reserve before leaving: a graduate with «Кадровий резерв» (or set so by hand)
+const wasReserve = (e) => (e.manual ? e.manual.status === 'Кадровий резерв' : !!(e.last && e.last.grad && !AUTO_POTENTIAL.has(e.last.status)));
+function dismissedPotentials(prog, kind = 'pot') {
+  const was = kind === 'res' ? wasReserve : wasPotential;
+  const since = new Date(D.today); since.setDate(since.getDate() - GONE_DAYS);
+  const from = since.toISOString().slice(0, 10);
+  return [...resEntries().values()].filter((e) => e.prog === prog && e.final === 'Звільнення' && !(e.last && e.last.appointed) && was(e)
+    && (person(e.pid).dismissed || '') >= from && (!state.reg || person(e.pid).cur_reg === state.reg))
+    .sort((a, b) => (person(b.pid).dismissed || '').localeCompare(person(a.pid).dismissed || ''));
+}
+// «−N» badge (unseen ones only); null when nothing new
+function goneBadge(prog, to, kind) {
+  const gone = dismissedPotentials(prog, kind), unseen = gone.filter((e) => !seenGone().has(goneKey(e)));
+  return unseen.length ? el('span', { role: 'button', tabindex: 0, class: 'gone-badge', text: `−${unseen.length}`,
+    title: `Звільнились за останній місяць: ${unseen.length} — натисніть, щоб переглянути`,
+    onclick: (ev) => { ev.stopPropagation(); openGone(gone, to, kind); } }) : null;
+}
+// «seen» is remembered per viewer in this browser (a convenience, not data)
+const goneKey = (e) => `${e.pid}|${e.prog}|${person(e.pid).dismissed}`;
+const seenStore = () => `lh-gone-seen:${HOOKS.userKey || 'admin'}`;
+function seenGone() {
+  try { return new Set(JSON.parse(localStorage.getItem(seenStore()) || '[]')); } catch { return new Set(); }
+}
+function markGoneSeen(list) {
+  try { const s = seenGone(); list.forEach((e) => s.add(goneKey(e))); localStorage.setItem(seenStore(), JSON.stringify([...s].slice(-500))); } catch { /* private mode */ }
+}
+function openGone(list, to, kind = 'pot') {
+  const box = el('div');
+  makeTable(box, [
+    T('name', 'ПІБ', (e) => person(e.pid).name, { cell: (e) => el('span', { class: 'link', text: person(e.pid).name }) }),
+    T('was', 'Ким був', (e) => (kind === 'res' ? (e.manual ? 'Кадровий резерв (вручну)' : 'Кадровий резерв')
+      : e.manual && e.manual.status === 'Потенційний' ? 'Потенційний (вручну)' : `Потенційний (${e.last.status})`)),
+    T('prog', 'Програма · потік', (e) => (e.last ? `${PROG[e.last.prog]} · ${e.last.year}` : 'поза програмою')),
+    T('pos', 'Посада', (e) => person(e.pid).last_pos || ''),
+    T('store', 'Магазин', (e) => person(e.pid).last_store || ''),
+    T('reg', 'Регіон', (e) => person(e.pid).cur_reg || ''),
+    T('d', 'Звільнився', (e) => fmtDate(person(e.pid).dismissed), { sortv: (e) => person(e.pid).dismissed }),
+  ], list, { onRow: (e) => openPerson(e.pid), sort: 'd', dir: -1, rowCls: () => 'row-gone' });
+  openModal(`🚪 Звільнились ${kind === 'res' ? 'з кадрового резерву' : 'потенційні'} на ${to} · ${list.length}`, `За останній місяць (з ${fmtDate(new Date(new Date(D.today).getTime() - GONE_DAYS * 864e5).toISOString().slice(0, 10))}), за «Історією працівника». Натисніть на рядок, щоб відкрити історію.`, box);
+  markGoneSeen(list);
+  render(); // the badge disappears for this viewer
+}
+
+// «Звільнені кадрові резервісти та потенційні»: who left the company while in
+// the reserve or among the potentials — kept for good, with period / kind switches
+const goneState = { kind: '', period: '12', to: '' };
+function renderGoneBlock() {
+  const from = (months) => { const d = new Date(D.today); d.setMonth(d.getMonth() - Number(months)); return d.toISOString().slice(0, 10); };
+  // already appointed to the target post before leaving — not a reserve loss
+  const all = [...resEntries().values()].filter((e) => e.final === 'Звільнення' && !(e.last && e.last.appointed) && (wasReserve(e) || wasPotential(e)))
+    .map((e) => Object.assign(e, { kindNow: wasReserve(e) ? 'res' : 'pot', name: person(e.pid).name }))
+    .filter((e) => !state.reg || person(e.pid).cur_reg === state.reg);
+  const inScope = all.filter((e) => (!goneState.to || e.prog === goneState.to) && (!goneState.period || (person(e.pid).dismissed || '') >= from(goneState.period)));
+  const shown = inScope.filter((e) => !goneState.kind || e.kindNow === goneState.kind);
+  const was = (e) => (e.kindNow === 'res' ? (e.manual ? 'Кадровий резерв (вручну)' : 'Кадровий резерв')
+    : e.manual && e.manual.status === 'Потенційний' ? 'Потенційний (вручну)' : `Потенційний (${e.last.status})`);
+  // months between the end of the stream and leaving
+  const after = (e) => { const end = e.last && (END[e.last.prog + e.last.year] || `${e.last.year}-12-31`); const d = person(e.pid).dismissed;
+    return end && d ? Math.round((new Date(d) - new Date(end)) / (30.44 * 864e5)) : null; };
+  const box = el('div');
+  makeTable(box, [
+    T('name', 'ПІБ', (e) => e.name, { cell: (e) => el('span', { class: 'link', text: e.name }) }),
+    T('was', 'Ким був', was, { cell: (e) => el('span', { class: 'pill ' + (e.kindNow === 'res' ? 'st-kr' : 'st-ipr'), text: was(e) }), sortv: (e) => (e.kindNow === 'res' ? 0 : 1) }),
+    T('to', 'На посаду', (e) => GRP_OF_PROG[e.prog] || ''),
+    T('prog', 'Програма · потік', (e) => (e.last ? `${PROG[e.last.prog]} · ${e.last.year}` : 'поза програмою')),
+    T('pos', 'Посада', (e) => person(e.pid).last_pos || ''),
+    T('store', 'Магазин', (e) => person(e.pid).last_store || ''),
+    T('reg', 'Регіон', (e) => person(e.pid).cur_reg || ''),
+    T('d', 'Звільнився', (e) => fmtDate(person(e.pid).dismissed), { sortv: (e) => person(e.pid).dismissed || '' }),
+    T('after', 'Після завершення', (e) => { const m = after(e); return m == null ? '—' : m < 0 ? 'під час навчання' : `${m} міс`; }, { num: true, sortv: (e) => after(e) }),
+  ], shown, { onRow: (e) => openPerson(e.pid), sort: 'd', dir: -1, tall: true, cls: 'rs-table' });
+  const n = (k) => inScope.filter((e) => !k || e.kindNow === k).length;
+  return card('gone', `🚪 Звільнені кадрові резервісти та потенційні · ${shown.length}`,
+    'Хто звільнився з компанії, будучи в кадровому резерві або серед потенційних, — за «Історією працівника». «Після завершення» — скільки місяців минуло від завершення потоку до звільнення. Натисніть на рядок, щоб відкрити історію.',
+    el('div', { class: 'seg-row' },
+      seg([['', `Усі · ${n('')}`], ['res', `Кадровий резерв · ${n('res')}`], ['pot', `Потенційні · ${n('pot')}`]], goneState.kind, (v) => { goneState.kind = v; }),
+      seg([['', 'Усі посади'], ['TZ', 'Товарознавець'], ['LH1', 'Заступник'], ['LH2', 'Директор']], goneState.to, (v) => { goneState.to = v; }),
+      seg([['1', '1 міс'], ['3', '3 міс'], ['12', '12 міс'], ['', 'Увесь час']], goneState.period, (v) => { goneState.period = v; })),
+    box);
+}
+
 // «Потенційні по регіонах»: region rows (count, or 🚩 when nobody), a click
 // opens the region's stores right in the table (0 shown as 0)
 const potOpen = new Set();
-function potRegionTree(regs, pot) {
-  const COLS = [['r', 'Директор'], ['d', 'Заступник'], ['t', 'Товарознавець']];
+function potRegionTree(regs, potAll) {
+  // «took part in a programme already» switch (was the separate «для участі в
+  // програмах розвитку» block)
+  const was = (e) => e.rows.length > 0;
+  const pot = potAll.filter((e) => !state.potWas || (state.potWas === 'yes') === was(e));
+  const nWas = (w) => potAll.filter((e) => was(e) === w).length;
+  const COLS = [['r', 'Директор · LH 2.0'], ['d', 'Заступник · LH 1.0'], ['t', 'Товарознавець · LH БЕК']];
   const cell = (row, k, isRegion) => {
     const g = row[k];
     if (!g.length) return isRegion ? el('span', { class: 'flag-red', text: '🚩', tip: () => [el('b', { text: `${row.k}: немає потенційних ${POT_TO[k]}` })] }) : el('span', { class: 'muted', text: '0' });
     return el('span', { class: 'num-tip', text: String(g.length), tip: () => [el('b', { text: `${row.k} · ${POT_TO[k]}: ${g.length}` }), namesList(g.map((e) => person(e.pid).name))] });
   };
-  const head = el('tr', {}, el('th', { text: 'Регіон' }), COLS.map(([, l]) => el('th', { class: 'num', text: l })));
+  const allCell = (row) => (row.all.length ? el('span', { class: 'num-tip', text: String(row.all.length), tip: () => [el('b', { text: `${row.k} · усього: ${row.all.length}` }), namesList(row.all.map((e) => person(e.pid).name))] }) : el('span', { class: 'muted', text: '0' }));
+  const head = el('tr', {}, el('th', { text: 'Регіон' }), COLS.map(([, l]) => el('th', { class: 'num', text: l })), el('th', { class: 'num', text: 'Усього' }));
   const tb = el('tbody');
   const draw = () => {
     tb.replaceChildren();
     regs.forEach((reg) => {
       const g = pot.filter((e) => e.reg === reg), row = Object.assign({ k: reg }, potBuckets(g)), open = potOpen.has(reg);
       const tr = el('tr', { class: 'row-clickable pt-region' + (open ? ' open' : ''), onclick: () => { if (open) potOpen.delete(reg); else potOpen.add(reg); draw(); } },
-        el('td', {}, el('span', { class: 'pt-caret', text: open ? '▾' : '▸' }), ' ' + reg), COLS.map(([k]) => el('td', { class: 'num' }, cell(row, k, true))));
+        el('td', {}, el('span', { class: 'pt-caret', text: open ? '▾' : '▸' }), ' ' + reg), COLS.map(([k]) => el('td', { class: 'num' }, cell(row, k, true))), el('td', { class: 'num' }, allCell(row)));
       tb.append(tr);
       if (open) storeRows(reg, g).forEach((st) => tb.append(el('tr', { class: 'row-clickable pt-store', onclick: () => openPotentialPeople(reg, st.k, st.all, g) },
-        el('td', { text: st.k }), COLS.map(([k]) => el('td', { class: 'num' }, cell(st, k, false))))));
+        el('td', { text: st.k }), COLS.map(([k]) => el('td', { class: 'num' }, cell(st, k, false))), el('td', { class: 'num' }, allCell(st)))));
     });
   };
   draw();
   const tot = potBuckets(pot);
-  const foot = el('tfoot', {}, el('tr', {}, el('td', { text: 'Разом' }), COLS.map(([k]) => el('td', { class: 'num', text: String(tot[k].length) }))));
-  return card('pot-regions', '🗺 Потенційні по регіонах',
-    'Усі потенційні, які працюють зараз, за поточним регіоном: автоматично (статус у програмі «ІПР» чи «Сертифікований») і відмічені вручну. 🚩 — у регіоні немає потенційних на цю посаду. Натисніть на регіон, щоб побачити магазини; на магазин — щоб побачити людей.',
+  const foot = el('tfoot', {}, el('tr', {}, el('td', { text: 'Разом' }), COLS.map(([k]) => el('td', { class: 'num', text: String(tot[k].length) })), el('td', { class: 'num', text: String(tot.all.length) })));
+  return card('pot-regions', `🗺 Потенційні по регіонах · ${pot.length}`,
+    'Хто працює зараз і може піти в програму розвитку, за поточним регіоном: автоматично (статус у програмі «ІПР» чи «Сертифікований») і відмічені вручну. 🚩 — у регіоні немає потенційних на цю посаду. Натисніть на регіон, щоб побачити магазини; на магазин — щоб побачити людей.',
+    el('div', { class: 'seg-row' }, seg([['', `Усі · ${potAll.length}`], ['no', `Ще не брали участі · ${nWas(false)}`], ['yes', `Вже брали участь у проєкті · ${nWas(true)}`]], state.potWas, (v) => { state.potWas = v; })),
     el('div', { class: 'table-scroll' }, el('table', { class: 'data-table pivot pot-tree' }, el('thead', {}, head), tb, foot)));
 }
 
@@ -1095,7 +1233,7 @@ function searchBox() {
   q.id = 'rs-q';
   return q;
 }
-const noteCell = (e) => (e.manual && !e.locked && (!HOOKS.readOnly || e.manual.status === 'Потенційний')
+const noteCell = (e) => (e.manual && !e.locked && (!HOOKS.readOnly || (e.manual.status === 'Потенційний' && (!HOOKS.canEditRegion || HOOKS.canEditRegion(person(e.pid).cur_reg || e.reg))))
   ? el('input', { type: 'text', class: 'rs-note', value: e.manual.note || '', placeholder: 'коментар', onclick: (ev) => ev.stopPropagation(),
     onchange: (ev) => HOOKS.setReserveStatus(e, e.manual.status, ev.target.value) })
   : el('span', { class: 'muted', text: e.manual && e.manual.note ? e.manual.note : '' }));
@@ -1175,14 +1313,14 @@ function renderStatusTable(all) {
     T('year', 'Потік', (e) => (e.last ? e.last.year : ''), { num: true, sortv: (e) => (e.last ? e.last.year : 0) }),
     admin ? T('manual', 'Статус вручну', (e) => (e.manual ? e.manual.status : ''), { cell: manualCell }) : null,
     T('note', 'Коментар', (e) => ((D.rnotes || {})[e.key] || {}).note || (e.manual && e.manual.note) || '', { cell: commentCell }),
-  ].filter(Boolean), shown, { onRow: (e) => openPerson(e.pid), sort: 'final', dir: 1, tall: true, rowCls: (e) => (potStale(e) ? 'row-stale' : null) });
+  ].filter(Boolean), shown, { onRow: (e) => openPerson(e.pid), sort: 'final', dir: 1, tall: true, cls: 'rs-table' }); // «понад рік» — highlighted on «Потенційні» only
   return card('res-status', ['👥 ', el('span', { class: 'has-tip', text: 'Доступний кадровий резерв', tip: metTip('avail') })],
     null,
     el('div', { class: 'rs-hint' },
       el('p', { text: 'Випускники зі статусом навчання «Кадровий резерв» або «ІПР» (LH 2.0 — і «Сертифікований»), які працюють зараз і ще не отримали посаду, до якої готує програма; понижені не включені.' }),
       el('p', { text: 'Регіон, магазин і посада — поточні, з «Історії працівника».' }),
       el('p', { text: `Наведіть на ПІБ, щоб побачити тести й ДЗ, натисніть — щоб відкрити історію. Щоб додати коментар, натисніть на клітинку «Коментар».${admin ? ' Статус вручну змінюють лише адміністратори.' : ''}` }),
-      el('p', { text: '⭐ — виключення: співробітник, який був понижений у посаді, але надалі рахується як кадровий резерв. Жовтим — понад рік у потенційних.' })),
+      el('p', { text: '⭐ — виключення: співробітник, який був понижений у посаді, але надалі рахується як кадровий резерв.' })),
     tools, box);
 }
 
@@ -1193,43 +1331,57 @@ function renderPotentials(root) {
   const pot = potAll.filter((e) => person(e.pid).work);
   const stores = D.stores.filter(([r]) => !state.reg || r === state.reg);
   const regs = uniqSorted(stores.map(([r]) => r).concat(pot.map((e) => e.reg)));
-  const rRows = regs.map((k) => {
-    const g = pot.filter((e) => e.reg === k), sts = storeRows(k, g);
-    return Object.assign({ k }, potBuckets(g), { nst: sts.length, noD: sts.filter((x) => !x.d.length).length });
-  });
-  const b = potBuckets(pot), noD = rRows.reduce((a, r) => a + r.noD, 0), nst = rRows.reduce((a, r) => a + r.nst, 0);
-  root.append(el('div', { class: 'kpi-grid k4' },
-    tile(String(b.t.length), '🧺 Потенційні на Товарознавця', 'працюють зараз'),
-    tile(String(b.d.length), '🟢 Потенційні на Заступника', 'працюють зараз'),
-    tile(String(b.r.length), '🟣 Потенційні на Директора', 'працюють зараз'),
-    tile(`${noD} з ${nst}`, '🚩 Магазинів без потенціалу на Заступника', state.reg || 'по мережі')));
+  // per post: potentials + stores with nobody toward it (current place of work)
+  const sts = regs.flatMap((k) => storeRows(k, pot.filter((e) => e.reg === k)));
+  const b = potBuckets(pot);
+  const POSTS = [['r', 'Директора', 'LH 2.0', 'LH2'], ['d', 'Заступника', 'LH 1.0', 'LH1'], ['t', 'Товарознавця', 'LH БЕК', 'TZ']];
+  root.append(el('div', { class: 'pot-groups' }, POSTS.map(([k, to, prog, code]) => {
+    const none = sts.filter((x) => !x[k].length).length;
+    // «−N»: potentials toward this post who left the company in the last month,
+    // until this viewer has opened the list
+    const potTile = tile(String(b[k].length), `🌱 Потенційні на ${to}`, `програма ${prog}`);
+    const badge = goneBadge(code, to, 'pot');
+    if (badge) potTile.append(badge);
+    return el('div', { class: 'pot-group' },
+      potTile,
+      tile(String(none), `🚩 Магазинів без потенціалу на ${to}`, `з ${sts.length} магазинів${state.reg ? ` · ${state.reg}` : ''}`, none ? 'v-red' : 'v-good'));
+  })));
 
   // list + adding
   const stale = potAll.filter(potStale);
   if (!stale.length) state.potStale = false;
-  const shown = potAll.filter((e) => qMatch(e) && (!state.potStale || potStale(e)));
+  const shown = potAll.filter((e) => qMatch(e) && (!state.potStale || potStale(e)) && (!state.potTo || e.prog === state.potTo));
   const box = el('div');
   // keep: re-mark as «Потенційний» (the year restarts); remove: «Не в резерві»
   // (a mark by hand is simply dropped unless the programme status makes them a potential)
   const keep = (e) => HOOKS.setReserveStatus(e, 'Потенційний', e.manual ? e.manual.note : '');
   const drop = (e) => (e.auto === 'Потенційний' ? HOOKS.setReserveStatus(e, 'Не в резерві', e.manual ? e.manual.note : '') : HOOKS.setReserveStatus(e, '', ''));
   const btn = (text, title, cls, fn) => el('button', { class: 'btn btn-sm ' + cls, text, title, onclick: (ev) => { ev.stopPropagation(); fn(); } });
+  const canEdit = (e) => !HOOKS.canEditRegion || HOOKS.canEditRegion(person(e.pid).cur_reg || e.reg);
   makeTable(box, [
-    T('name', 'ПІБ', (e) => e.name, { cell: (e) => el('span', { class: 'link', text: e.name }) }),
-    T('tab', 'Таб. №', (e) => person(e.pid).tab || '—'),
+    T('name', 'ПІБ', (e) => e.name, { cell: (e) => el('span', { class: 'link', text: e.name, tip: e.manual && e.manual.status === 'Потенційний'
+      ? () => [el('b', { text: e.name }), el('div', { text: `Відмічено вручну ${fmtDate(e.manual.at.slice(0, 10))}${e.manual.by ? ` · ${e.manual.by}` : ''}` }), e.manual.note ? el('div', { class: 'muted', text: `«${e.manual.note}»` }) : null]
+      : null }) }),
+    HOOKS.readOnly ? null : T('tab', 'Таб. №', (e) => person(e.pid).tab || '—'), // admins only
     T('to', 'Потенційний на', (e) => potTo(e.prog), { sortv: (e) => ({ TZ: 0, LH1: 1, LH2: 2 }[e.prog]) }),
     T('pos', 'Посада зараз', (e) => (person(e.pid).work ? person(e.pid).cur_pos : 'не працює')),
     T('store', 'Магазин', (e) => e.store || ''),
     T('reg', 'Регіон', (e) => e.reg || ''),
-    T('prog', 'Програми', (e) => (e.rows.length ? e.rows.map((x) => `${PROG[x.prog]} · ${x.year}: ${x.status}`).join('; ') : '—')),
-    T('note', 'Коментар', (e) => (e.manual ? e.manual.note : ''), { cell: noteCell }),
-    T('at', 'Відмічено', (e) => (e.manual && e.manual.status === 'Потенційний' ? fmtDate(e.manual.at.slice(0, 10)) + (e.manual.by ? ` · ${e.manual.by}` : '') : `авто: ${e.last ? e.last.status : '—'}`), { sortv: (e) => (e.manual ? e.manual.at : '') }),
+    // the latest programme: stream and status apart (earlier ones on hover)
+    T('stream', 'Потік', (e) => (e.last ? `${PROG[e.last.prog]} · ${e.last.year}` : 'поза програмою'),
+      { sortv: (e) => (e.last ? e.last.year * 10 + tgtRank(e.last.prog) : 0),
+        cell: (e) => el('span', { text: e.last ? `${PROG[e.last.prog]} · ${e.last.year}` : 'поза програмою', class: e.last ? null : 'muted',
+          tip: e.rows.length > 1 ? () => [el('b', { text: 'Усі програми' }), ...e.rows.map((x) => el('div', { text: `${PROG[x.prog]} · ${x.year}: ${x.status}` }))] : null }, e.rows.length > 1 ? el('span', { class: 'muted', text: ` +${e.rows.length - 1}` }) : null) }),
+    T('pst', 'Статус у програмі', (e) => (e.last ? e.last.status : ''), { cell: (e) => (e.last ? pill(PSTAT, e.last.status) : el('span', { class: 'muted', text: '—' })), sortv: (e) => (e.last ? PSTAT_ORDER.indexOf(e.last.status) : 99) }),
     T('since', 'У потенційних з', (e) => (potSince(e) ? fmtDate(potSince(e)) : '—'), { sortv: (e) => potSince(e) || '', tip: 'potsince' }),
-    T('del', '', () => '', { cell: (e) => (potStale(e)
+    // regional team: keep / remove only people working in its own regions
+    T('del', '', () => '', { cell: (e) => (!canEdit(e) ? null : potStale(e)
       ? el('span', { class: 'btn-pair' }, btn('✓ Залишити', 'Досі потенційний — рік рахується заново від сьогодні', 'btn-primary', () => keep(e)), btn('✕ Прибрати', 'Більше не потенційний — статус резерву «Не в резерві»', 'btn-secondary', () => drop(e)))
       : e.manual ? btn('✕', 'Прибрати з потенційних', 'btn-secondary', () => drop(e)) : null) }),
-  ], shown, { onRow: (e) => openPerson(e.pid), sort: 'to', dir: 1, tall: true, rowCls: (e) => (potStale(e) ? 'row-stale' : null) });
+  ].filter(Boolean), shown, { onRow: (e) => openPerson(e.pid), sort: 'to', dir: 1, tall: true, cls: 'rs-table', rowCls: (e) => (potStale(e) ? 'row-stale' : null) });
+  const cnt = (p) => potAll.filter((e) => !p || e.prog === p).length;
   root.append(card('pot-list', `🌱 Потенційні · ${potAll.length}`, 'Сертифіковані та ІПР потрапляють сюди автоматично і переходять у кадровий резерв, коли статус у програмі стане «Кадровий резерв»; інших можна відмітити вручну. Жовтим — понад рік у потенційних (від завершення потоку або від відмітки): вирішіть «Залишити» чи «Прибрати». У доступний кадровий резерв не входять. Натисніть на рядок, щоб відкрити історію.',
+    el('div', { class: 'seg-row' }, seg([['', `Усі · ${cnt('')}`], ['TZ', `Товарознавець · ${cnt('TZ')}`], ['LH1', `Заступник · ${cnt('LH1')}`], ['LH2', `Директор · ${cnt('LH2')}`]], state.potTo, (v) => { state.potTo = v; })),
     el('div', { class: 'filters-inline' }, ff('ПІБ працівника', searchBox(), 'wide'),
       stale.length ? el('label', { class: 'stale-toggle' }, el('input', { type: 'checkbox', checked: state.potStale || null, onchange: (ev) => { state.potStale = ev.target.checked; render(); } }), el('span', { class: 'stale-mark' }), `Понад рік у потенційних: ${stale.length} — лише ці`) : null,
       el('button', { class: 'btn btn-primary btn-sm', style: 'margin-left:auto', text: '+ Додати потенційного', onclick: () => HOOKS.addPotential('LH1') })),
@@ -1238,21 +1390,6 @@ function renderPotentials(root) {
   // by region -> its stores, expanded in place (current place of work)
   root.append(potRegionTree(regs, pot));
 
-  // who to bring into a development programme: region x programme, never took part / already did
-  const was = (e) => e.rows.length > 0;
-  const grp = pot.filter((e) => (state.potWas ? was(e) : !was(e)));
-  const label = state.potWas ? 'вже брали участь у проєкті' : 'ще не брали участі';
-  const dbox = el('div');
-  const sum = (rs, k) => rs.reduce((a, r) => a + r[k].length, 0);
-  makeTable(dbox, [T('k', 'Регіон', (r) => r.k || '—'), ...devCols()],
-    regs.map((k) => Object.assign({ k }, potBuckets(grp.filter((e) => e.reg === k)))),
-    { cls: 'pivot', sort: 'all', dir: -1, onRow: (r) => openPotentialStores(r.k, grp.filter((e) => e.reg === r.k), label),
-      total: (rs) => ({ k: 'Разом по проєкту', d: sum(rs, 'd'), r: sum(rs, 'r'), t: sum(rs, 't'), all: sum(rs, 'all') }) });
-  const n = (w) => pot.filter((e) => was(e) === w).length;
-  root.append(card('pot-dev', `🎯 Потенційні для участі в програмах розвитку · ${grp.length}`,
-    'Хто працює зараз і може піти в потік: LH 1.0 — потенційні на Заступника, LH 2.0 — на Директора, LH БЕК — на Товарознавця. Натисніть на регіон, щоб побачити магазини й співробітників.',
-    el('div', { class: 'seg-row' }, seg([[false, `Ще не брали участі · ${n(false)}`], [true, `Вже брали участь у проєкті · ${n(true)}`]], !!state.potWas, (v) => { state.potWas = v; })),
-    dbox));
 }
 
 // ---------- filters UI
@@ -1337,7 +1474,7 @@ function bind() {
   const on = (id, k, reset) => $(id).addEventListener('change', (e) => { state[k] = e.target.value; if (reset) state.store = ''; render(); });
   on('#f-year', 'year'); on('#f-reg', 'reg', true); on('#f-store', 'store'); on('#f-prog', 'prog');
   document.querySelectorAll('#f-work button').forEach((b) => b.addEventListener('click', () => { state.workOnly = b.dataset.v === 'work'; render(); }));
-  $('#f-reset').addEventListener('click', () => { Object.assign(partState, { reg: '', store: '', year: '', pst: '', cur: '' }); Object.assign(state, { year: '', reg: '', store: '', pos: '', prog: '', status: '', q: '', workOnly: true }); render(); });
+  $('#f-reset').addEventListener('click', () => { Object.assign(partState, { q: '', reg: '', store: '', year: '', pst: '', cur: '' }); Object.assign(state, { year: '', reg: '', store: '', pos: '', prog: '', status: '', q: '', workOnly: true }); render(); });
   if (HOOKS.readOnly) $('#lh-settings').hidden = true; // HR: no stream settings
   else $('#lh-settings').addEventListener('click', () => HOOKS.settings(TAB_PROG[state.tab] || 'LH1'));
   $('#f-reg-side').addEventListener('change', (e) => { state.reg = e.target.value; state.store = ''; render(); });

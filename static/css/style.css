@@ -774,8 +774,8 @@ select:not(.st-sel):not(.lh-status):focus, .search-input:focus, input[type="text
 .filters-inline > .stale-toggle, .filters-inline > .btn { flex: 0 0 auto; margin-bottom: 6px; }
 
 /* «Потенційні по регіонах»: regions with their stores opened in place */
-.lh-root table.pot-tree th:first-child, .lh-root table.pot-tree td:first-child { width: 40%; }
-.lh-root table.pot-tree th.num, .lh-root table.pot-tree td.num { width: 20%; }
+.lh-root table.pot-tree th:first-child, .lh-root table.pot-tree td:first-child { width: 36%; }
+.lh-root table.pot-tree th.num, .lh-root table.pot-tree td.num { width: 16%; }
 .lh-root .pot-tree .pt-caret { display: inline-block; width: 12px; color: var(--color-muted); font-size: 11px; }
 .lh-root .pot-tree tr.pt-store td { background: var(--color-bg, #f5f6f8); }
 .lh-root .pot-tree tr.pt-store td:first-child { padding-left: 30px; }
@@ -812,3 +812,30 @@ select:not(.st-sel):not(.lh-status):focus, .search-input:focus, input[type="text
 .audit-table td { vertical-align: top; }
 .audit-table td:nth-child(2) { min-width: 280px; }
 .audit-table td:nth-child(5) { min-width: 320px; }
+
+/* «Доступний кадровий резерв»: surname and name on one line */
+.lh-root table.rs-table td:first-child { white-space: nowrap; }
+
+/* «Потенційні»: per post a frame with two tiles — potentials | stores without */
+.lh-root .pot-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 20px; }
+.lh-root .pot-group { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; padding: 10px; border-radius: var(--radius-md); background: var(--color-card); box-shadow: var(--shadow-card); }
+.lh-root .pot-group .kpi-tile { background: var(--color-bg, #f4f5f7); box-shadow: none; }
+@media (max-width: 1100px) { .lh-root .pot-groups { grid-template-columns: minmax(0, 1fr); } }
+
+/* «Порівняння потоків»: table left, the chart right */
+.lh-root .cohort-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+@media (max-width: 1000px) { .lh-root .cohort-grid { grid-template-columns: minmax(0, 1fr); } }
+.lh-root .line-chart .lc-axis, .lh-root .line-chart .lc-cat { font-size: 12px; fill: var(--color-muted); }
+.lh-root .line-chart .lc-cat { fill: var(--color-graphite-dark); font-weight: 600; }
+.lh-root .line-chart .lc-val { font-size: 12px; font-weight: 700; paint-order: stroke; stroke: var(--color-card); stroke-width: 4px; stroke-linejoin: round; } /* a halo so the value reads over the lines */
+.lh-root .line-chart circle { cursor: help; }
+.lh-root .legend.center { justify-content: center; margin-top: 4px; }
+
+/* «−N» on a potentials tile: left the company in the last month */
+.lh-root .pot-group .kpi-tile { position: relative; }
+.lh-root .gone-badge { position: absolute; top: 12px; right: 12px; border: 0; cursor: pointer; font: inherit; font-weight: 700; font-size: 14px;
+  padding: 3px 10px; border-radius: 999px; background: var(--color-red); color: #fff; box-shadow: 0 0 0 4px rgba(229, 52, 42, .15); }
+.lh-root .gone-badge.seen { background: #e7e8eb; color: var(--color-muted); box-shadow: none; }
+.lh-root .data-table tr.row-gone td { background: rgba(229, 52, 42, .06); }
+.lh-root .kpi-half { position: relative; }
+.lh-root .kpi-half .gone-badge { top: 4px; right: 8px; font-size: 13px; padding: 2px 8px; }

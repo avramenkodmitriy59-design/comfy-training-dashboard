@@ -658,6 +658,16 @@ function showApp() {
 // roles: admin — everything; hr — «Все навчання», «Атестація», «Стажери»,
 // «Кадровий резерв» (read) + work with potentials. The server enforces the
 // same split; hiding here only keeps the page tidy.
+// regional team limited to its regions (from Feed at sign-in); null — all
+const regionKey = (n) => {
+  const k = String(n || '').toLowerCase().replace('регіон', '').split(/\s+/).filter(Boolean).join(' ');
+  return { 'київський правий': 'київ правобережний', 'київський лівий': 'київ лівобережний' }[k] || k;
+};
+function myRegionKeys() {
+  const regs = state.role === 'hr' && state.user && state.user.regions;
+  return regs && regs.length ? new Set(regs.map(regionKey)) : null;
+}
+const isMyRegion = (name) => { const k = myRegionKeys(); return !k || k.has(regionKey(name)); };
 const HR_TABS = ['overall', 'attestation', 'trainees', 'reserve'];
 const ADMIN_ONLY_BUTTONS = ['btn-category-analysis', 'btn-classify', 'btn-feed-sync', 'btn-upload'];
 function applyRole(data) {
@@ -670,7 +680,8 @@ function applyRole(data) {
   ADMIN_ONLY_BUTTONS.forEach((id) => { const b = document.getElementById(id); if (b) b.hidden = hr; });
   document.getElementById('btn-access').hidden = !data.accessOwner; // only the owner sets up access
   const u = state.user;
-  document.getElementById('user-label').textContent = u ? `${u.short || u.fio || u.login}${hr ? ' · Регіональна команда' : ''}` : 'адмін';
+  const regs = hr && u && u.regions && u.regions.length ? ` · ${u.regions.join(', ')}` : '';
+  document.getElementById('user-label').textContent = u ? `${u.short || u.fio || u.login}${hr ? ' · Регіональна команда' : ''}${regs}` : 'адмін';
   if (!tabAllowed(state.tab)) {
     state.tab = 'overall';
     document.querySelectorAll('.tabs .tab-btn[data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === 'overall'));
@@ -974,16 +985,19 @@ async function refreshSummary() {
   // a region (or store) is picked: the «за регіонами» charts still show every
   // region for comparison (same other filters), the picked one highlighted
   state.regionCompare = null;
-  if (!isAepStream() && (fp.region || fp.store)) {
-    const all = await api(`/api/summary?${qs({ streamType, streamKey, periodId, ...fp, region: '', store: '' })}`);
+  const mine = myRegionKeys();
+  if (!isAepStream() && (fp.region || fp.store || mine)) {
+    const all = await api(`/api/summary?${qs({ streamType, streamKey, periodId, ...fp, region: '', store: '', compare: mine ? 1 : '' })}`);
     const byStore = state._filterOptions && state._filterOptions.storesByRegion;
     const hl = fp.region || (byStore ? Object.keys(byStore).find((r) => (byStore[r] || []).includes(fp.store)) : '') || '';
-    state.regionCompare = { byRegion: all.byRegion || {}, highlight: hl };
+    // regional team with nothing picked: all of its regions highlighted
+    const hlAll = hl ? [hl] : mine ? Object.keys(all.byRegion || {}).filter(isMyRegion) : [];
+    state.regionCompare = { byRegion: all.byRegion || {}, highlight: hlAll };
     // stores of the region: when a store is picked too, all of the region's
     // stores (the picked one highlighted)
     state.storeCompare = !hl ? null : fp.store
-      ? { region: hl, byStore: (await api(`/api/summary?${qs({ streamType, streamKey, periodId, ...fp, region: hl, store: '' })}`)).byStore || {}, highlight: fp.store }
-      : { region: hl, byStore: data.byStore || {}, highlight: '' };
+      ? { region: hl, byStore: (await api(`/api/summary?${qs({ streamType, streamKey, periodId, ...fp, region: hl, store: '' })}`)).byStore || {}, highlight: [fp.store] }
+      : { region: hl, byStore: data.byStore || {}, highlight: [] };
   } else {
     state.storeCompare = null;
   }
@@ -1200,10 +1214,11 @@ function renderFiltersBar() {
   // For AEP, "Рівень" no longer drives state.filters.region (see below), so
   // it can't scope "Тип заходу" options the way Регіон scopes Магазин for
   // the other streams — always show every event type.
-  const stores = !aep && f.region ? (opts.storesByRegion[f.region] || []) : Object.values(opts.storesByRegion).flat();
+  const stores = !aep && f.region ? (opts.storesByRegion[f.region] || [])
+    : Object.entries(opts.storesByRegion).filter(([reg]) => aep || isMyRegion(reg)).flatMap(([, v]) => v);
 
   const regionLabel = aep ? 'Рівень' : 'Регіон';
-  const regionAllLabel = aep ? 'Усі рівні' : 'Усі регіони';
+  const regionAllLabel = aep ? 'Усі рівні' : (myRegionKeys() ? 'Усі мої регіони' : 'Усі регіони');
   const storeLabel = aep ? 'Тип заходу' : 'Магазин';
   const storeAllLabel = aep ? 'Усі типи' : 'Усі магазини';
   const positionLabel = aep ? 'Тема' : 'Посада';
@@ -1216,7 +1231,7 @@ function renderFiltersBar() {
   // the source file never splits a session's plan by tier.
   const regionOptionsHtml = aep
     ? AEP_TIER_ORDER.map((t) => `<option value="${escapeHtml(t)}" ${t === state.aepTierFilter ? 'selected' : ''}>${escapeHtml(t)}</option>`).join('')
-    : opts.regions.map((r) => `<option value="${escapeHtml(r)}" ${r === f.region ? 'selected' : ''}>${escapeHtml(r)}</option>`).join('');
+    : opts.regions.filter(isMyRegion).map((r) => `<option value="${escapeHtml(r)}" ${r === f.region ? 'selected' : ''}>${escapeHtml(r)}</option>`).join('');
 
   el.innerHTML = `
     ${periodFieldHtml}
@@ -1424,7 +1439,7 @@ function barChartColors(values) {
   return values.map((v) => STATUS_COLORS[statusBucket(v)] || '#c7cad1');
 }
 
-function renderBucketBarChart(chartKey, canvasId, bucket, sumField, countField = 'count', highlight = '') {
+function renderBucketBarChart(chartKey, canvasId, bucket, sumField, countField = 'count', highlight = []) {
   destroyChart(chartKey);
   const ctx = document.getElementById(canvasId);
   if (!ctx) return; // e.g. the "за посадами" card is hidden for this project
@@ -1467,7 +1482,7 @@ function renderStoreCharts() {
 }
 
 const regionBucket = () => (state.regionCompare ? state.regionCompare.byRegion : state.summary.byRegion);
-const regionHighlight = () => (state.regionCompare ? state.regionCompare.highlight : '');
+const regionHighlight = () => (state.regionCompare ? state.regionCompare.highlight : []);
 
 function renderRegionChart() {
   const field = isProjectStream() ? 'testsSum' : 'progressSum';
@@ -1488,7 +1503,7 @@ function renderRegionScoreChart() {
 
 // Engagement (% actually participating vs. enrolled) is a ratio of two
 // counts, not a sum-of-percentages average, so it gets its own chart function.
-function renderEngagementChart(chartKey, canvasId, bucket, highlight = '') {
+function renderEngagementChart(chartKey, canvasId, bucket, highlight = []) {
   destroyChart(chartKey);
   const ctx = document.getElementById(canvasId);
   if (!ctx) return; // e.g. the "за посадами" card is hidden for this project
@@ -1515,17 +1530,22 @@ function renderRegionEngagementChart() {
 }
 
 // the picked region stays in full colour with a bold ▶ label; the rest fade
+// highlight: the picked region(s) / store stay in full colour with a bold ▶
+// label; the rest fade
+const hlList = (h) => (Array.isArray(h) ? h : h ? [h] : []);
 function highlightColors(entries, highlight) {
   const colors = barChartColors(entries.map((e) => e[1]));
-  return highlight ? colors.map((c, i) => (entries[i][0] === highlight ? c : `${c}40`)) : colors;
+  const hl = hlList(highlight);
+  return hl.length ? colors.map((c, i) => (hl.includes(entries[i][0]) ? c : `${c}40`)) : colors;
 }
 
-function chartBarOptions(labels = [], highlight = '') {
-  const y = highlight ? {
+function chartBarOptions(labels = [], highlight = []) {
+  const hl = hlList(highlight);
+  const y = hl.length ? {
     ticks: {
-      callback: (v, i) => (labels[i] === highlight ? `▶ ${labels[i]}` : labels[i]),
-      font: (c) => ({ weight: labels[c.index] === highlight ? 'bold' : 'normal' }),
-      color: (c) => (labels[c.index] === highlight ? '#1f2228' : '#9a9da5'),
+      callback: (v, i) => (hl.includes(labels[i]) ? `▶ ${labels[i]}` : labels[i]),
+      font: (c) => ({ weight: hl.includes(labels[c.index]) ? 'bold' : 'normal' }),
+      color: (c) => (hl.includes(labels[c.index]) ? '#1f2228' : '#9a9da5'),
     },
   } : {};
   return {
@@ -3091,6 +3111,8 @@ async function renderReserveView() {
   };
   LeaderHub.mount(document.getElementById('lh-mount'), rs.data, {
     readOnly: state.role === 'hr', // HR: only the potentials can be changed
+    canEditRegion: (reg) => isMyRegion(reg), // HR: potentials of its own regions only
+    userKey: (state.user && state.user.login) || 'admin', // per-viewer «seen» marks
     settings: (prog) => openLhSettingsModal(prog, reload),
     newStream: (prog) => openNewStreamModal(prog),
     addParticipant: (prog, year) => openAddParticipantModal(prog, year),
@@ -3345,7 +3367,7 @@ function openAddPotentialModal(program, reload) {
   const data = (state.reserve && state.reserve.data) || {};
   // stores grouped by region, for picking a store's team
   const byReg = {};
-  (data.stores || []).forEach(([r, st]) => { (byReg[r || '—'] = byReg[r || '—'] || []).push(st); });
+  (data.stores || []).forEach(([r, st]) => { if (isMyRegion(r)) (byReg[r || '—'] = byReg[r || '—'] || []).push(st); });
   const storeOpts = Object.keys(byReg).sort((a, b) => a.localeCompare(b, 'uk')).map((r) =>
     `<optgroup label="${escapeHtml(r)}">${byReg[r].map((st) => `<option value="${escapeHtml(st)}">${escapeHtml(st)}</option>`).join('')}</optgroup>`).join('');
   root.innerHTML = `
