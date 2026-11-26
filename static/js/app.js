@@ -699,6 +699,22 @@ function toggleLoginMode() {
   document.getElementById('login-error').textContent = '';
 }
 
+// sign-in progress inside the login card: 0 — the form; 1 — Feed checks the
+// login (and the access rules); 2 — the dashboard's data is loading
+function setLoginProgress(step) {
+  const card = document.querySelector('.login-card');
+  card.classList.toggle('loading', step > 0);
+  document.getElementById('login-progress').hidden = step === 0;
+  document.getElementById('lp-step1').textContent = loginByPassword ? 'Перевірка пароля' : 'Вхід через Feed';
+  const sub = document.getElementById('login-subtitle');
+  if (step > 0) { sub.dataset.text = sub.dataset.text || sub.textContent; sub.textContent = 'Зачекайте кілька секунд…'; } else if (sub.dataset.text) { sub.textContent = sub.dataset.text; delete sub.dataset.text; }
+  document.querySelectorAll('.lp-steps li').forEach((li) => {
+    const n = Number(li.dataset.step);
+    li.classList.toggle('done', n < step);
+    li.classList.toggle('active', n === step);
+  });
+}
+
 async function doLogin() {
   const user = document.getElementById('login-user');
   const input = document.getElementById('login-password');
@@ -707,6 +723,7 @@ async function doLogin() {
   errorEl.textContent = '';
   if (!loginByPassword && !user.value.trim()) { errorEl.textContent = 'Введіть логін Feed'; return; }
   btn.disabled = true; btn.textContent = loginByPassword ? 'Перевіряю…' : 'Перевіряю у Feed…';
+  setLoginProgress(1);
   try {
     // the Feed password goes to the dashboard server and on to Feed only
     const res = await fetch('api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -714,11 +731,15 @@ async function doLogin() {
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) throw new Error(data.error || 'Не вдалося увійти');
     input.value = '';
+    setLoginProgress(2);
     applyRole(await api('/api/session'));
+    await bootstrap(); // loads while the progress is on screen, then the app appears ready
     showApp();
-    await bootstrap();
+    setLoginProgress(0);
     watchFeedAuto();
   } catch (e) {
+    setLoginProgress(0);
+    showLogin();
     errorEl.textContent = e.message;
   } finally {
     btn.disabled = false; btn.textContent = 'Увійти';
@@ -2761,11 +2782,20 @@ async function handleFeedSync() {
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Завантаження з Feed…';
   try {
-    const resp = await api('/api/feed-sync', {
+    const start = await api('/api/feed-sync', {
       method: 'POST',
       body: JSON.stringify({ login, password: passwordEl.value, attPeriod: `${year}-${quarter}`, reports }),
     });
     passwordEl.value = '';
+    // the reports are pulled in the background (minutes); wait for the job
+    let job;
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 3000));
+      job = await api(`/api/feed-job/${start.jobId}`);
+      if (job.status !== 'running') break;
+    }
+    if (job.status === 'error' || !job.result || job.result.error) throw new Error((job.result && job.result.error) || 'Не вдалося оновити з Feed');
+    const resp = job.result;
     await loadPositionsConfig();
     await loadStreams();
     renderPositionSwitch();
@@ -4706,7 +4736,7 @@ async function renderAuditLog() {
     </div>
     <div class="table-scroll" style="max-height:460px;"><table class="data-table"><thead><tr><th>Коли</th><th>Хто</th><th>Розділ</th><th>Дія</th><th>Деталі</th></tr></thead>
       <tbody>${data.rows.map((r) => `<tr><td style="white-space:nowrap;">${fmtAt(r.at)}</td>
-        <td>${escapeHtml(r.fio || r.login || '')}<div class="muted">${escapeHtml(r.position || '')}</div></td>
+        <td>${escapeHtml(r.fio || r.login || '')}<div class="muted">${escapeHtml(r.position || '')}</div>${r.login || r.tab ? `<div class="muted" style="font-size:12px;">${[r.login ? `логін ${escapeHtml(r.login)}` : '', r.tab ? `таб. № ${escapeHtml(r.tab)}` : ''].filter(Boolean).join(' · ')}</div>` : ''}${r.mag || r.reg ? `<div class="muted" style="font-size:12px;">${[r.mag, r.reg].filter(Boolean).map(escapeHtml).join(' · ')}</div>` : ''}</td>
         <td>${escapeHtml(r.section)}</td>
         <td class="${/Немає доступу|Невдала/.test(r.action) ? 'error-text' : ''}"><b>${escapeHtml(r.action)}</b></td>
         <td>${escapeHtml(r.details || '')}</td></tr>`).join('') || '<tr><td class="muted" colspan="5">За цими фільтрами записів немає</td></tr>'}</tbody></table></div>

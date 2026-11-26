@@ -5,6 +5,7 @@ import secrets
 import hmac
 import hashlib
 import datetime
+import gzip
 import time
 import threading
 
@@ -476,9 +477,6 @@ def _upload_name(d):
 
 
 AUDIT = {
-    "feed_sync": lambda d, b, r: ("Feed", "Оновив з Feed вручну",
-        f"{r.get('label')}: збережено {len(r.get('saved') or [])}"
-        + (f", пропущено {len(r.get('skipped'))}" if r.get("skipped") else "")),
     "upload": lambda d, b, r: ("Завантаження", "Завантажив звіт",
         f"{_upload_name(d)}{' · ' + r.get('streamKey') if d.get('streamType') == 'attestation' else ''} · {d.get('label', '')} · {r.get('rowsCount', 0)} рядків"),
     "upload_employee_history": lambda d, b, r: ("Завантаження", "Завантажив «Історію працівника»", f"{r.get('total', '')} рядків")
@@ -532,6 +530,32 @@ def audit_capture():
             g.audit_before = _audit_before()
         except Exception:  # noqa: BLE001 — the log never blocks the change
             g.audit_before = {}
+
+
+@app.after_request
+def bump_on_write(resp):
+    if request.method in ("POST", "PUT", "PATCH", "DELETE") and resp.status_code < 400 \
+            and request.path.startswith("/api/") and not request.path.startswith(("/api/login", "/api/logout")):
+        try:
+            _bump_data_ver()
+        except Exception as e:  # noqa: BLE001
+            app.logger.warning("data_ver bump failed: %s", e)
+    return resp
+
+
+@app.after_request
+def gzip_json(resp):
+    """Big JSON (the reserve dataset is ~1.2 MB) goes gzipped: ~6x smaller."""
+    if (resp.status_code < 300 and resp.mimetype == "application/json" and not resp.direct_passthrough
+            and "gzip" in (request.headers.get("Accept-Encoding") or "").lower()
+            and "Content-Encoding" not in resp.headers):
+        body = resp.get_data()
+        if len(body) > 2048:
+            resp.set_data(gzip.compress(body, compresslevel=5))
+            resp.headers["Content-Encoding"] = "gzip"
+            resp.headers["Content-Length"] = str(len(resp.get_data()))
+            resp.vary.add("Accept-Encoding")
+    return resp
 
 
 @app.after_request
@@ -800,13 +824,44 @@ def feed_sync():
 
     client = FeedClient()
     try:
-        client.login(login, password)
-        result = run_feed_sync(client, year, quarter, period, reports)
+        client.login(login, password)  # quick; the reports themselves take minutes
     except FeedError as e:
         return jsonify({"error": str(e)}), 502
-    if not result["saved"] and not result["skipped"]:
-        return jsonify({"error": f"У Feed немає атестаційних занять за {label}"}), 404
-    return jsonify({"ok": True, **result})
+    who = dict(session.get("user") or {})
+    job_id = _job_start("manual", who)
+    if not job_id:
+        return jsonify({"error": "Зараз уже йде оновлення з Feed (можливо, автоматичне після входу) — спробуйте за кілька хвилин"}), 409
+    # runs in the background: the proxy in front of the site cuts requests
+    # longer than a minute (504); the page polls /api/feed-job/<id>
+    threading.Thread(target=_feed_manual_run, args=(client, job_id, year, quarter, period, reports, label, who), daemon=True).start()
+    return jsonify({"ok": True, "jobId": job_id})
+
+
+def _feed_manual_run(client, job_id, year, quarter, period, reports, label, who):
+    try:
+        result = run_feed_sync(client, year, quarter, period, reports)
+        if not result["saved"] and not result["skipped"]:
+            _job_finish(job_id, "error", {"error": f"У Feed немає атестаційних занять за {label}"})
+            return
+        _job_finish(job_id, "done", {"ok": True, **result})
+        detail = f"{result['label']}: збережено {len(result['saved'])}"
+        if result["skipped"]:
+            detail += ", " + _skip_summary(result["skipped"])
+        audit("Feed", "Оновив з Feed вручну", detail, who=who or {})
+    except Exception as e:  # noqa: BLE001 — reported to the page through the job
+        _job_finish(job_id, "error", {"error": str(e)[:300]})
+
+
+@app.get("/api/feed-job/<int:job_id>")
+def feed_job(job_id):
+    conn = db.get_db()
+    try:
+        r = conn.execute("SELECT * FROM feed_jobs WHERE id = ?", (job_id,)).fetchone()
+    finally:
+        conn.close()
+    if not r:
+        return jsonify({"error": "Не знайдено"}), 404
+    return jsonify({"status": r["status"], "result": json.loads(r["result"]) if r["result"] else None})
 
 
 def _stored_coverage(stream_type, stream_key, label):
@@ -837,6 +892,14 @@ def _looks_partial(new_regions, new_rows, stored):
 
 FEED_ATT_NAMES = {"dir": "Директори", "tv": "Товарознавці", "klad": "Комірники", "kass": "Касири",
                   "sm": "Сервіс-менеджери", "prod": "Продавці", "sellers": "Продавці"}
+
+
+def _skip_summary(skipped):
+    """«пропущено N (…)» grouped by reason: «Директори, Касири — причина»."""
+    by = {}
+    for x in skipped:
+        by.setdefault(x["reason"], []).append(_report_name(x).replace("Атестація: ", ""))
+    return f"пропущено {len(skipped)} (" + "; ".join(f"{', '.join(v)} — {k}" for k, v in by.items()) + ")"
 
 
 def _report_name(x):
@@ -926,8 +989,44 @@ def run_feed_sync(client, year, quarter, period, reports, guard=False):
 # per FEED_AUTO_HOURS, one run at a time.
 FEED_AUTO_HOURS = float(os.environ.get("FEED_AUTO_HOURS", "6"))
 FEED_AUTO_REPORTS = ["attestation", "sellers", "overall", "trainees"]
-FEED_AUTO = {"running": False, "startedAt": None, "by": None}
-_feed_auto_lock = threading.Lock()
+FEED_JOB_STALE_MIN = 30  # a «running» job older than this is treated as dead
+
+
+def _job_start(kind, who):
+    """Register a Feed job unless one is already running (any worker) -> id or None."""
+    conn = db.get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        since = (datetime.datetime.utcnow() - datetime.timedelta(minutes=FEED_JOB_STALE_MIN)).isoformat(timespec="seconds") + "Z"
+        if conn.execute("SELECT 1 FROM feed_jobs WHERE status = 'running' AND started_at >= ?", (since,)).fetchone():
+            conn.rollback()
+            return None
+        cur = conn.execute("INSERT INTO feed_jobs (kind, status, started_at, by_login) VALUES (?, 'running', ?, ?)",
+                           (kind, _now(), (who or {}).get("login")))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def _job_finish(job_id, status, result):
+    conn = db.get_db()
+    try:
+        conn.execute("UPDATE feed_jobs SET status = ?, finished_at = ?, result = ? WHERE id = ?",
+                     (status, _now(), json.dumps(result, ensure_ascii=False), job_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _job_running(kind=None):
+    since = (datetime.datetime.utcnow() - datetime.timedelta(minutes=FEED_JOB_STALE_MIN)).isoformat(timespec="seconds") + "Z"
+    conn = db.get_db()
+    try:
+        q = "SELECT 1 FROM feed_jobs WHERE status = 'running' AND started_at >= ?" + (" AND kind = ?" if kind else "")
+        return bool(conn.execute(q, (since, kind) if kind else (since,)).fetchone())
+    finally:
+        conn.close()
 
 
 def _feed_auto_last(conn):
@@ -950,6 +1049,11 @@ def _prev_quarter_pending(conn):
 
 
 def maybe_start_feed_auto(client, who):
+    # admins only: a regional team login sees just its part of the network in
+    # Feed (checked 2026-11-26 — every report came back partial), so its run
+    # would save nothing and only hold the 6-hour pause
+    if who.get("role") != "admin":
+        return False
     conn = db.get_db()
     try:
         last, _ = _feed_auto_last(conn)
@@ -966,14 +1070,14 @@ def maybe_start_feed_auto(client, who):
         new_quarter = pending and last_dt < quarter_start
         if not new_quarter and (datetime.datetime.utcnow() - last_dt).total_seconds() < FEED_AUTO_HOURS * 3600:
             return False
-    if not _feed_auto_lock.acquire(blocking=False):
+    job_id = _job_start("auto", who)
+    if not job_id:
         return False
-    FEED_AUTO.update(running=True, startedAt=datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z", by=who)
-    threading.Thread(target=_feed_auto_run, args=(client, who), daemon=True).start()
+    threading.Thread(target=_feed_auto_run, args=(client, who, job_id), daemon=True).start()
     return True
 
 
-def _feed_auto_run(client, who):
+def _feed_auto_run(client, who, job_id):
     today = datetime.date.today()
     year, quarter = today.year, (today.month - 1) // 3 + 1
     jobs = [(year, quarter, "current_quarter")]
@@ -985,16 +1089,16 @@ def _feed_auto_run(client, who):
     finally:
         conn.close()
     prev_done = False
+    n = 0
     try:
-        notes, n = [], 0
+        notes = []
         for y, q, period in jobs:
             try:
                 res = run_feed_sync(client, y, q, period, FEED_AUTO_REPORTS, guard=True)
                 note = f"{res['label']}: збережено {len(res['saved'])}"
                 if res["skipped"]:
                     # which report and why — so «пропущено» can be understood from the log
-                    why = "; ".join(f"{_report_name(x)} — {x['reason']}" for x in res["skipped"])
-                    note += f", пропущено {len(res['skipped'])} ({why})"
+                    note += ", " + _skip_summary(res["skipped"])
                 n += len(res["saved"])
                 # the previous quarter is pulled once: an admin sees the whole
                 # network, so whatever they got is final; a regional login
@@ -1017,8 +1121,7 @@ def _feed_auto_run(client, who):
         finally:
             conn.close()
     finally:
-        FEED_AUTO.update(running=False)
-        _feed_auto_lock.release()
+        _job_finish(job_id, "done", {"saved": n})
 
 
 @app.get("/api/feed-auto")
@@ -1028,7 +1131,7 @@ def feed_auto_status():
         last, n = _feed_auto_last(conn)
     finally:
         conn.close()
-    return jsonify({"running": FEED_AUTO["running"], "lastAt": last, "lastSaved": n})
+    return jsonify({"running": _job_running("auto"), "lastAt": last, "lastSaved": n})
 
 
 # ---------- Кадровий резерв (Leader Hub) ----------
@@ -1428,6 +1531,36 @@ def reserve_note_set():
     return jsonify({"ok": True})
 
 
+# The reserve dataset walks the whole employee history (≈137k rows) — computed
+# once and reused until anything changes (every successful write bumps
+# «data_ver» in the DB, so both gunicorn workers notice).
+_RESERVE_CACHE = {"key": None, "data": None}
+_reserve_lock = threading.Lock()
+
+
+def _data_ver(conn):
+    r = conn.execute("SELECT value FROM app_meta WHERE key = 'data_ver'").fetchone()
+    return r["value"] if r else 0
+
+
+def _bump_data_ver():
+    conn = db.get_db()
+    try:
+        conn.execute("INSERT INTO app_meta (key, value) VALUES ('data_ver', 1) "
+                     "ON CONFLICT(key) DO UPDATE SET value = value + 1")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _reserve_dataset(conn, as_of):
+    key = (_data_ver(conn), as_of)
+    with _reserve_lock:
+        if _RESERVE_CACHE["key"] != key:
+            _RESERVE_CACHE.update(key=key, data=reserve.lh_dataset(conn, as_of))
+        return _RESERVE_CACHE["data"]
+
+
 @app.get("/api/reserve")
 def reserve_view():
     """Everything the "Кадровий резерв" tab needs (see reserve.lh_dataset and
@@ -1438,7 +1571,7 @@ def reserve_view():
     # numbers drift down as the file ages
     up = conn.execute("SELECT uploaded_at FROM data_uploads WHERE kind = 'employee_history'").fetchone()
     as_of = datetime.date.fromisoformat(up["uploaded_at"][:10]) if up else None
-    data = reserve.lh_dataset(conn, as_of)
+    data = dict(_reserve_dataset(conn, as_of))
     data["streams"] = [dict(r) for r in conn.execute(
         "SELECT program, year, date_start, date_end FROM lh_streams ORDER BY year DESC, program")]
     data["uploads"] = {r["kind"]: {"rows": r["rows"], "uploadedAt": r["uploaded_at"]}

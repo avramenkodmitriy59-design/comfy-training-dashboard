@@ -18,6 +18,14 @@
     <input type="password" id="login-password" placeholder="Пароль Feed" autocomplete="current-password">
     <button class="btn btn-primary btn-block" id="login-submit">Увійти</button>
     <button type="button" class="login-alt" id="login-mode">Вхід адміністратора за паролем сайту</button>
+    <!-- shown instead of the form while signing in (see setLoginProgress) -->
+    <div class="login-progress" id="login-progress" hidden aria-live="polite">
+      <div class="lp-bar"><span></span></div>
+      <ol class="lp-steps">
+        <li data-step="1"><i></i><span id="lp-step1">Вхід через Feed</span></li>
+        <li data-step="2"><i></i><span>Завантаження даних</span></li>
+      </ol>
+    </div>
   </div>
 </div>
 

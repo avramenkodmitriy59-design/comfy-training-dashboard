@@ -190,6 +190,23 @@ CREATE TABLE IF NOT EXISTS admin_notes (
     updated_at TEXT NOT NULL,
     updated_by TEXT
 );
+-- small shared counters (e.g. «data_ver»: bumped on every change so each
+-- gunicorn worker knows its cached reserve dataset is stale)
+CREATE TABLE IF NOT EXISTS app_meta (
+    key TEXT PRIMARY KEY,
+    value INTEGER NOT NULL DEFAULT 0
+);
+-- Feed sync jobs (manual and on login) run in the background; their state is
+-- here so every gunicorn worker can answer «is it running / what came out»
+CREATE TABLE IF NOT EXISTS feed_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,            -- auto | manual
+    status TEXT NOT NULL,          -- running | done | error
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    by_login TEXT,
+    result TEXT                    -- JSON
+);
 CREATE TABLE IF NOT EXISTS store_regions (
     store TEXT PRIMARY KEY,
     region TEXT NOT NULL

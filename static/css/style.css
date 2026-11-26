@@ -785,3 +785,25 @@ select:not(.st-sel):not(.lh-status):focus, .search-input:focus, input[type="text
 .lh-side #ff-reg-side { flex-direction: row; align-items: center; gap: 8px; min-width: 0; }
 .lh-side #ff-reg-side label { margin: 0; }
 .lh-side #ff-reg-side select { padding: 7px 10px; font-size: 13px; min-width: 200px; }
+
+/* sign-in: the card turns into a progress view while Feed checks the login
+   and the dashboard loads */
+.login-card.loading > input, .login-card.loading > #login-submit, .login-card.loading > .login-alt, .login-card.loading > #login-error { display: none; }
+.login-card.loading .logo { animation: lp-pulse 1.6s ease-in-out infinite; }
+@keyframes lp-pulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.06); opacity: .85; } }
+.login-progress { margin-top: 18px; text-align: left; }
+.lp-bar { height: 6px; border-radius: 3px; background: #e7f6e4; overflow: hidden; position: relative; margin-bottom: 18px; }
+.lp-bar span { position: absolute; top: 0; bottom: 0; width: 40%; border-radius: 3px; background: var(--color-green); animation: lp-slide 1.2s ease-in-out infinite; }
+@keyframes lp-slide { 0% { left: -40%; } 100% { left: 100%; } }
+.lp-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.lp-steps li { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--color-muted); }
+.lp-steps li i { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--color-border); box-sizing: border-box; flex: 0 0 18px; position: relative; }
+.lp-steps li.active { color: var(--color-text); font-weight: 600; }
+.lp-steps li.active i { border-color: var(--color-green); border-right-color: transparent; animation: spin .8s linear infinite; }
+.lp-steps li.done { color: var(--color-text); }
+.lp-steps li.done i { border-color: var(--color-green); background: var(--color-green); }
+.lp-steps li.done i::after { content: ''; position: absolute; left: 4px; top: 1px; width: 5px; height: 9px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+@media (prefers-reduced-motion: reduce) {
+  .login-card.loading .logo, .lp-bar span, .lp-steps li.active i { animation: none; }
+  .lp-bar span { left: 0; width: 100%; opacity: .6; }
+}
