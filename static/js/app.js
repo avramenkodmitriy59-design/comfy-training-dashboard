@@ -4734,7 +4734,7 @@ async function renderAuditLog() {
       ${sel('au-section', 'Розділ', o('', 'Усі', auditFilter.section) + data.sections.map((x) => o(x, x, auditFilter.section)).join(''))}
       ${sel('au-days', 'Період', [['1', 'Сьогодні'], ['7', '7 днів'], ['30', '30 днів'], ['', 'Усе']].map(([v, t]) => o(v, t, auditFilter.days)).join(''))}
     </div>
-    <div class="table-scroll" style="max-height:460px;"><table class="data-table"><thead><tr><th>Коли</th><th>Хто</th><th>Розділ</th><th>Дія</th><th>Деталі</th></tr></thead>
+    <div class="table-scroll" style="max-height:460px;"><table class="data-table audit-table"><thead><tr><th>Коли</th><th style="min-width:280px;">Хто</th><th>Розділ</th><th>Дія</th><th>Деталі</th></tr></thead>
       <tbody>${data.rows.map((r) => `<tr><td style="white-space:nowrap;">${fmtAt(r.at)}</td>
         <td>${escapeHtml(r.fio || r.login || '')}<div class="muted">${escapeHtml(r.position || '')}</div>${r.login || r.tab ? `<div class="muted" style="font-size:12px;">${[r.login ? `логін ${escapeHtml(r.login)}` : '', r.tab ? `таб. № ${escapeHtml(r.tab)}` : ''].filter(Boolean).join(' · ')}</div>` : ''}${r.mag || r.reg ? `<div class="muted" style="font-size:12px;">${[r.mag, r.reg].filter(Boolean).map(escapeHtml).join(' · ')}</div>` : ''}</td>
         <td>${escapeHtml(r.section)}</td>

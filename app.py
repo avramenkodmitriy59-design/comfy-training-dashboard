@@ -19,7 +19,7 @@ import reserve
 from feed_sync import (
     FeedClient, FeedError, fetch_attestation_reports, fetch_overall_report, fetch_sellers_report, fetch_trainees,
     trainee_success, dismissed_during_internship, trainee_failure_reasons, TRAINEE_TYPE_LABELS,
-    relative_quarter_period,
+    relative_quarter_period, region_probe as feed_region_probe,
 )
 from aggregate import (
     aggregate, clean_row, detect_attestation_stream, distribution, ATTESTATION_STREAMS,
@@ -309,6 +309,10 @@ def login():
     session.update(authenticated=True, role=role, at=time.time(),
                    user={k: prof.get(k) for k in ("login", "tab", "fio", "short", "position", "mag")})
     session.permanent = True
+    if role == "hr":
+        # find out what Feed says about the regions this person may see (to
+        # limit the regional team to its region) — logged, in the background
+        threading.Thread(target=_region_probe_run, args=(client, dict(prof)), daemon=True).start()
     started = maybe_start_feed_auto(client, {**{k: prof.get(k) for k in ("login", "tab", "fio", "position", "mag", "reg")}, "role": role})
     return jsonify({"ok": True, "role": role, "feedAuto": started})
 
@@ -1046,6 +1050,13 @@ def _prev_quarter_pending(conn):
     y, q = _prev_quarter()
     r = conn.execute("SELECT rows FROM data_uploads WHERE kind='feed_auto_prev'").fetchone()
     return not r or r["rows"] != y * 10 + q
+
+
+def _region_probe_run(client, prof):
+    try:
+        audit("Feed", "Регіони у Feed", feed_region_probe(client), who=prof)
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning("region probe failed: %s", e)
 
 
 def maybe_start_feed_auto(client, who):

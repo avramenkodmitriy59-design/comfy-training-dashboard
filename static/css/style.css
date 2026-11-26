@@ -807,3 +807,8 @@ select:not(.st-sel):not(.lh-status):focus, .search-input:focus, input[type="text
   .login-card.loading .logo, .lp-bar span, .lp-steps li.active i { animation: none; }
   .lp-bar span { left: 0; width: 100%; opacity: .6; }
 }
+
+/* «Журнал»: «Хто» wide enough for name, position, login and Feed department */
+.audit-table td { vertical-align: top; }
+.audit-table td:nth-child(2) { min-width: 280px; }
+.audit-table td:nth-child(5) { min-width: 320px; }
